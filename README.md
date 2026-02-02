@@ -1,19 +1,19 @@
-# Workflow Gemini + Aider
+# 🚀 Workflow Gemini + Aider
 
-## Prérequis
+## 📋 Prérequis
 
-Python installé sur le poste. J'utilise ici la version 3.10.
+🐍 Python installé sur le poste. J'utilise ici la version 3.10.
 
-**Aider** installé avec **pipx**. Pour rappel , la commande d'installation est la suivante :
+🤖 **Aider** installé avec **pipx**. Pour rappel , la commande d'installation est la suivante :
 
 ```bash
 pipx install --python C:\laragon\bin\python\python-3.10\python.exe aider-chat
 ```
 
->NOTE : L'exécutable Python est appelé via son chemin absolu pour cibler l'environnement spécifique où sont installées toutes les dépendances du projet (**google-genai**, **pyreadline3**, etc.).
+[!IMPORTANT] NOTE : L'exécutable Python est appelé via son chemin absolu pour cibler l'environnement spécifique où sont installées toutes les dépendances du projet (**google-genai**, **pyreadline3**, etc.).
 >Cela garantit l'étanchéité du workflow, même si une autre version de Python est prioritaire dans le PATH du système.
 
-## Étape 1 : Installation du moteur (SDK)
+## 🛠️ Étape 1 : Installation du moteur (SDK)
 
 L'IA utilisée par défaut est **Gemini**.
 Pour installer ses bibliothèques Python :
@@ -22,7 +22,7 @@ Pour installer ses bibliothèques Python :
 C:\laragon\bin\python\python-3.10\python.exe -m pip install -U google-genai
 ```
 
-## Étape 2 : Configuration de la sécurité (Variable d'environnement)
+## 🔐 Étape 2 : Configuration de la sécurité (Variable d'environnement)
 
 ```PowerShell
 # Définit la clé de façon permanente pour l'utilisateur
@@ -30,13 +30,13 @@ C:\laragon\bin\python\python-3.10\python.exe -m pip install -U google-genai
 # Note : Redémarrer le terminal après cette commande
 ```
 
-## Étape 3 : Ajouter les fichiers dans le PATH
+## 🌐 Étape 3 : Ajouter les fichiers dans le PATH
 
 Pour que les commandes soient accessibles globalement, 
 les scripts du projet doivent être déposés dans un répertoire ajouté au PATH ou dèjà inclus.
 J'ai ici choisi le dossier `C:\Users\bulam\.local\bin`.
 
-## Fichier de prompt système
+## 🧠 Fichier de prompt système
 
 Pour que Gemini reste focalisé sur certains principes, sans avoir à les lui répéter constamment,
 il est possible de lui fournir un fichier `prompt_system.txt`, contenant les directives. Par exemple :
@@ -59,7 +59,7 @@ Sois précis et technique. Évite les bavardages inutiles.
 Ce fichier **Prompt System** est importé à chaque appel du scrfipt **ask.py**, 
 dans lequel un chemin par défaut a été ajouté : `C:\Users\mon_user\.local\bin\prompt_system.txt`.
 
-## Étape 4 : Création de la commande gemini (Alias Cmder) 
+##⚡Étape 4 : Création de la commande gemini (Alias Cmder) 
 
 Pour faciliter l'appel du script **ask.py**, un alias peut être configuré. 
 Pour cela, ouvrir le fichier `C:\laragon\bin\cmder\config\user_aliases.cmd` (ou le dossier cmder) et ajouter :
@@ -68,7 +68,7 @@ Pour cela, ouvrir le fichier `C:\laragon\bin\cmder\config\user_aliases.cmd` (ou 
 gemini="C:\laragon\bin\python\python-3.10\python.exe" C:\Users\mon_user\.local\bin\ask.py $*
 ```
 
-## Utilisation de l'alias **gemini**
+## ⌨️ Utilisation de l'alias **gemini**
 
 Pour interroger **Gemini** depuis le terminal :
 
@@ -83,7 +83,7 @@ Par exemple, avec un fichier `prompt.txt` contenant la question précédente :
 $ gemini -f prompt.txt
 ```
 
-### Fournir du contexte
+### 📂 Fournir du contexte
 
 Pour fournir du contexte à Gemini, que ce soit des fichiers dont il doit avoir connaissance ou des fichiers à modifier,
 on peut utiliser la commande **cat** :
@@ -113,9 +113,9 @@ gemini < audit.txt
 Bien que Gemini Flash accepte énormément de texte, envoyer tout un projet (ex: le dossier vendor/), 
 aura pour conséquence d'épuiser le quota inutilement et de "noyer" l'IA dans des informations inutiles.
 
-L'idée est de cibler : Instruction / prompt + 1 ou 2 fichiers **maximum** pour une précision optimale.
+🎯 L'idée est de cibler : Instruction / prompt + 1 ou 2 fichiers **maximum** pour une précision optimale.
 
-## Coopération d'IA : Gemini + Aider
+## 🤝 Coopération d'IA : Gemini + Aider
 
 Le projet vise à optimiser un flux de travail utilisant Gemini comme cerveau et Aider comme acteur.
 
@@ -126,7 +126,7 @@ Pour ce faire, les deux outils sont installés globalement :
 
 L'idée est de faire coopérer les deux outils en passant la sortie de l'un à l'autre.
 
-Pour ne pas perdre l'historique des discussions, 
+💾 Pour ne pas perdre l'historique des discussions, 
 tout en fournissant un fichier qui contienne uniquement les informations pertinentes,
 la dernière sortie est enregistrée seule dans un fichier `dernier_plan.md`, 
 mais également ajoutée par concaténation à un autre fichier, nommé `historique_global.md`.
@@ -151,7 +151,7 @@ $ glog "Analyse ce contrôleur pour PHP 8.2"
 
 Et la sortie se trouve enregistrée dans les fichiers `dernier_plan.md` et `historique_global.md` de manière automatique.
 
-## Exploiter la sortie avec **Aider**
+## 🛠️ Exploiter la sortie avec **Aider**
 
 Pour demander à **Aider** d'exécuter les dernières instructions listées par Gemini dans le fichier `dernier_plan.md` :
 
@@ -185,7 +185,7 @@ Il est automatiquement intégré lors de l'appel du script Python `ask.py` au mo
 $ set PYTHONIOENCODING=utf-8
 ```
 
-## Déclaration de variables d'environnement
+## ⚙️ Déclaration de variables d'environnement
 
 Pour simplifier et harmoniser les chemins appelés depuis les scripts Python et les alias Cmder, 
 les variables peuvent être déclarées dans le fichier de configuration du terminal 
@@ -204,7 +204,7 @@ set PYTHON_BIN=C:\laragon\bin\python\python-3.10\python.exe
 set ASK_SCRIPT=C:\Users\mon_user\.local\bin\ask.py
 ```
 
-## Alias Gemini + journalisation
+## 🧠 Alias Gemini + journalisation
 
 Un autre alias peut également être créé dans le fichier de configuration du terminal 
 (`C:\laragon\bin\cmder\config\user_aliases.cmd`) : par exemple **glog** (Gemini + Log)
@@ -298,7 +298,7 @@ Ce script demande à l'IA d'effectuer les actions suivantes :
 
 De cette manière, un historique complet du flux de questions et réponses de la discussion est conservée.
 
-## Alias **ago** (Aider Go)
+## 🏃 Alias **ago** (Aider Go)
 
 Pour simplifer l'appel à **Aider**, 
 un alias **ago** (Aider Go !) peut être créé dans le fichier de configuration du terminal 
@@ -313,7 +313,7 @@ Cet alias appel **Aider** en lui passant en argument le fichier `dernier_plan.md
 Il précise également de ne pas faire de commit et de ne pas demander l'ajout du fichier `.env` à chaque appel.
 Charge au développeur de faire ces actions après revue et validation des modifications.
 
-## Le prompt_system d'Aider
+## 📜 Le prompt_system d'Aider
 
 À chaque initialisation, **Aider** recherche à la racine du projet un fichier nommé `instruction.md`,
 dont il charge les directives en tant que **System Prompt** qui s'ajoute au message.
@@ -366,15 +366,14 @@ Concentre-toi sur l'édition parfaite du code source.
   propose une correction dans le chat avant d'éditer le fichier.
 ```
 
-## Saisie interactive
+## 💬 Saisie interactive
 
 Pour faciliter les saisies complexes, un script interactif a été créé : **glog_interactive.py**. 
 Il ajoute les fonctionnalités suivantes :
 
-- auto-complétion des chemins des fichiers fournis en contexte
-- possibilité de ne fournir que des passages de ces fichiers en délimitant par lignes (par ex : 100-150)
-- possibilité de fournir plusieurs parties d'un même fichier
-- ajout d'un spinner pour signifier que la recherche est en cours
+- ✨ auto-complétion des chemins des fichiers fournis en contexte
+- ✂️ possibilité de fournir une ou plusieurs parties d'un même fichier en les délimitant (par ex : 100-150)
+- 🌀 ajout d'un spinner pour signifier que la recherche est en cours
 
 ### Installation de la librairie pyreadline3
 
