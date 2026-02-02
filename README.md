@@ -4,13 +4,22 @@
 
 Python installé sur le poste. J'utilise ici la version 3.10.
 
+**Aider** installé avec **pipx**. Pour rappel , la commande d'installation est la suivante :
+
+```bash
+pipx install --python C:\laragon\bin\python\python-3.10\python.exe aider-chat
+```
+
+>NOTE : L'exécutable Python est appelé via son chemin absolu pour cibler l'environnement spécifique où sont installées toutes les dépendances du projet (**google-genai**, **pyreadline3**, etc.).
+>Cela garantit l'étanchéité du workflow, même si une autre version de Python est prioritaire dans le PATH du système.
+
 ## Étape 1 : Installation du moteur (SDK)
 
 L'IA utilisée par défaut est **Gemini**.
 Pour installer ses bibliothèques Python :
 
 ```PowerShell
-pip install -U google-genai
+C:\laragon\bin\python\python-3.10\python.exe -m pip install -U google-genai
 ```
 
 ## Étape 2 : Configuration de la sécurité (Variable d'environnement)
