@@ -2,115 +2,146 @@ import os
 import subprocess
 import datetime
 import glob
+import threading
+import time
 
-# Tentative d'import de pyreadline pour l'auto-complétion sous Windows
+# --- Configuration de l'auto-complétion ---
 try:
     import readline
 
 
     def completer(text, state):
-        """Fonction d'auto-complétion des chemins de fichiers."""
-        # On utilise glob pour lister les fichiers correspondants au texte saisi
         options = glob.glob(text + '*')
         if state < len(options):
-            # Ajoute un slash si c'est un dossier pour faciliter la navigation
             option = options[state]
-            if os.path.isdir(option):
-                return option + os.sep
-            return option
+            return option + os.sep if os.path.isdir(option) else option
         return None
 
 
     readline.set_completer(completer)
     readline.parse_and_bind("tab: complete")
-    # Définit les délimiteurs pour que les chemins avec slashs soient bien gérés
     readline.set_completer_delims(' \t\n;')
 except ImportError:
-    # On définit readline à None pour éviter l'avertissement de variable non définie
     readline = None
-    print("Note: Installez 'pyreadline3' pour l'auto-complétion (pip install pyreadline3)")
 
 
-def get_input(prompt_text):
-    return input(prompt_text).strip()
+# --- Fonctions utilitaires ---
+
+def find_file_recursive(filename):
+    """Cherche un fichier dans les sous-dossiers (exclut les dossiers lourds)"""
+    exclude_dirs = {'.git', 'vendor', 'node_modules', 'var', 'cache'}
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        if filename in files:
+            return os.path.join(root, filename)
+    return None
 
 
-def extract_ranges(file_path, line_ranges):
-    if not line_ranges:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+def spinner_task(stop_event):
+    """Animation de chargement compatible Windows/Cmder"""
+    chars = ['|', '/', '-', '\\']
+    idx = 0
+    while not stop_event.is_set():
+        print(f"\r[Gemini réfléchit...] {chars[idx % len(chars)]}", end="", flush=True)
+        idx += 1
+        time.sleep(0.1)
+    print("\r" + " " * 30 + "\r", end="", flush=True)
 
+
+def extract_single_range(lines, r_string, file_path):
+    """Extrait une seule plage de lignes"""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        parts = []
-        for r in line_ranges.split(','):
-            start, end = map(int, r.split('-'))
-            part = lines[start - 1:end]
-            parts.append(f"--- {file_path} (Lignes {r}) ---\n" + "".join(part))
-        return "\n\n[...]\n\n".join(parts)
+        start, end = map(int, r_string.split('-'))
+        part = lines[start - 1:end]
+        return f"--- {file_path} (Lignes {r_string}) ---\n" + "".join(part)
     except Exception as e:
-        return f"Erreur sur le fichier {file_path}: {e}"
+        return f"  [!] Erreur sur la plage {r_string}: {e}"
 
 
 def run():
     print("=== ASSISTANT DE CONTEXTE GEMINI ===")
 
-    # 1. Le Prompt
-    main_prompt = get_input("Votre question / instruction : ")
+    main_prompt = input("Votre question / instruction : ").strip()
     if not main_prompt:
         print("Erreur : Le prompt est obligatoire.")
         return
 
-    # 2. Les Fichiers
     context_blocks = []
     while True:
-        # Ici, la touche TAB fonctionnera pour f_path
-        f_path = get_input("\nFichier à ajouter (TAB pour compléter, Entrée pour terminer) : ")
-        if not f_path:
+        f_input = input("\nFichier (Nom ou Chemin / TAB / Entrée pour passer à l'envoi) : ").strip()
+        if not f_input:
             break
 
-        # Nettoyage des éventuels guillemets ajoutés par un copier-coller de chemin
-        f_path = f_path.replace('"', '').replace("'", "")
+        f_path = f_input.replace('"', '').replace("'", "")
 
         if not os.path.exists(f_path):
-            print(f"Fichier '{f_path}' introuvable.")
+            print(f"  Recherche de '{f_path}'...")
+            found = find_file_recursive(f_path)
+            if found:
+                print(f"  Trouvé : {found}")
+                f_path = found
+            else:
+                print(f"  Erreur : Impossible de localiser le fichier.")
+                continue
+
+        # Lecture du fichier une seule fois pour toutes ses plages
+        try:
+            with open(f_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"  Erreur de lecture : {e}")
             continue
 
-        ranges = get_input(f"Plages de lignes pour '{f_path}' (ex: 1-20,150-180 ou Entrée pour tout) : ")
-        content = extract_ranges(f_path, ranges)
-        context_blocks.append(content)
+        # --- Sous-boucle pour les plages (Ranges) ---
+        file_parts = []
+        while True:
+            r_input = input(
+                f"  Ajouter une plage pour '{os.path.basename(f_path)}' (ex: 10-50 / Entrée si fini) : ").strip()
+            if not r_input:
+                # Si aucune plage n'a été saisie du tout, on prend tout le fichier
+                if not file_parts:
+                    context_blocks.append("".join(lines))
+                    print(f"  -> Fichier complet ajouté.")
+                break
 
-    # 3. Compilation finale
+            part = extract_single_range(lines, r_input, f_path)
+            file_parts.append(part)
+            print(f"  [+] Plage {r_input} ajoutée.")
+
+        if file_parts:
+            context_blocks.append("\n\n[...]\n\n".join(file_parts))
+
+    if not context_blocks and not main_prompt:
+        return
+
     full_context = "\n\n---\n\n".join(context_blocks)
-
-    # 4. Exécution (Appel à ask.py)
     ask_script = os.environ.get('ASK_SCRIPT', r'C:\Users\bulam\.local\bin\ask.py')
     python_bin = os.environ.get('PYTHON_BIN', 'python')
 
+    stop_spinner = threading.Event()
+    spinner_thread = threading.Thread(target=spinner_task, args=(stop_spinner,))
+
     try:
+        spinner_thread.start()
+
         process = subprocess.Popen(
             [python_bin, ask_script, main_prompt],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8'
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8'
         )
 
         stdout, stderr = process.communicate(input=full_context)
 
+        stop_spinner.set()
+        spinner_thread.join()
+
         if process.returncode != 0:
-            print(f"Erreur : {stderr}")
+            print(f"Erreur API : {stderr}")
             return
 
-        # 5. Journalisation
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"\n{'=' * 50}\nDATE : {timestamp}\nPROMPT : {main_prompt}\n{'-' * 50}\n{stdout}"
-
         with open('historique_global.md', 'a', encoding='utf-8') as h:
-            h.write(log_entry)
+            h.write(f"\n{'=' * 50}\nDATE : {timestamp}\nPROMPT : {main_prompt}\n{'-' * 50}\n{stdout}")
         with open('dernier_plan.md', 'w', encoding='utf-8') as p:
             p.write(stdout)
 
@@ -118,7 +149,9 @@ def run():
         print(stdout)
 
     except Exception as e:
-        print(f"Erreur système : {e}")
+        stop_spinner.set()
+        if spinner_thread.is_alive(): spinner_thread.join()
+        print(f"\nErreur système : {e}")
 
 
 if __name__ == "__main__":
