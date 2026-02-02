@@ -10,7 +10,7 @@
 pipx install --python C:\laragon\bin\python\python-3.10\python.exe aider-chat
 ```
 
-> ⚠️ **IMPORTANT :** : L'exécutable Python est appelé via son chemin absolu pour cibler l'environnement spécifique où sont installées toutes les dépendances du projet (**google-genai**, **pyreadline3**, etc.).
+> ⚠️ **IMPORTANT** : L'exécutable Python est appelé via son chemin absolu pour cibler l'environnement spécifique où sont installées toutes les dépendances du projet (**google-genai**, **pyreadline3**, etc.).
 >Cela garantit l'étanchéité du workflow, même si une autre version de Python est prioritaire dans le PATH du système.
 
 ## 🛠️ Étape 1 : Installation du moteur (SDK)
