@@ -393,6 +393,9 @@ Concentre-toi sur l'édition parfaite du code source.
   propose une correction dans le chat avant d'éditer le fichier.
 ```
 
+## ⚠️ Une astuce de pro : La surcharge locale
+Si un projet nécessite une configuration différente, il suffit de créer un fichier `.aider.instructions.md` à la racine de ce projet, qui prend alors la priorité.
+
 ## 💬 Saisie interactive
 
 Pour faciliter les saisies complexes, un script interactif a été créé : **glog_interactive.py**. 
