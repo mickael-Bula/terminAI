@@ -65,7 +65,7 @@ Pour faciliter l'appel du script **ask.py**, un alias peut être configuré.
 Pour cela, ouvrir le fichier `C:\laragon\bin\cmder\config\user_aliases.cmd` (ou le dossier cmder) et ajouter :
 
 ```DOS
-gemini="C:\laragon\bin\python\python-3.10\python.exe" C:\Users\mon_user\.local\bin\ask.py $*
+gemini="C:\laragon\bin\python\python-3.10\python.exe" %USERPROFILE%\.local\bin\ask.py $*
 ```
 
 ## ⌨️ Utilisation de l'alias **gemini**
@@ -329,7 +329,7 @@ gitignore: false               # Ne pas modifier le .gitignore
 dark-mode: true                # Pour le confort visuel dans Cmder
 map-tokens: 1024               # Taille de la "carte" du projet envoyée à l'IA
 read:
-  - %USERPROFILE%\.aider.instructions.md # Pour spécifier un chemin ou nom de fichier non conventionnel
+  - C:\Users\bulam\.aider.instructions.md # Pour spécifier un chemin ou nom de fichier non conventionnel
 ```
 
 ## 🎨 Le guide de style : .aider.instruction.md
