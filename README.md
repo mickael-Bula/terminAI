@@ -193,15 +193,15 @@ les variables peuvent être déclarées dans le fichier de configuration du term
 
 ```cmd
 :: Ajout du dossier des scripts Gemini au PATH
-set "PATH=C:\Users\mon_user\.local\bin;%PATH%"
+set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 
 :: Déclare l'encodage UTF-8 pour les scripts Python
 set PYTHONIOENCODING=utf-8
 
 :: Chemins vers les exécutables et scripts
-set LOCAL_BIN=C:\Users\mon_user\.local\bin
+set LOCAL_BIN=%USERPROFILE%\.local\bin
 set PYTHON_BIN=C:\laragon\bin\python\python-3.10\python.exe
-set ASK_SCRIPT=C:\Users\mon_user\.local\bin\ask.py
+set ASK_SCRIPT=%USERPROFILE%\.local\bin\ask.py
 ```
 
 ## 🧠 Alias Gemini + journalisation
@@ -313,9 +313,36 @@ Cet alias appel **Aider** en lui passant en argument le fichier `dernier_plan.md
 Il précise également de ne pas faire de commit et de ne pas demander l'ajout du fichier `.env` à chaque appel.
 Charge au développeur de faire ces actions après revue et validation des modifications.
 
-## 📜 Le prompt_system d'Aider
+## ⚙️ Le fichier de configuration d'Aider : .aider.conf.yml
 
-À chaque initialisation, **Aider** recherche à la racine du projet un fichier nommé `instruction.md`,
+Le fichier `.aider.conf.yml` sert à définir comment Aider doit se comporter techniquement. 
+C'est ici que les préférences sont enregistrées pour ne plus avoir à saisir de longs flags dans un terminal.
+
+- Rôle : Automatiser les options de la ligne de commande.
+- Emplacement : Racine du projet ou répertoire personnel (`~/.aider.conf.yml` sous Linux et `C:\%USERPROFILE%\.aider.conf.yml` sous Windonws).
+- Exemple de contenu pour ton workflow :
+
+```yaml
+model: gemini/gemini-2.0-flash # On peut forcer le modèle ici
+auto-commits: false            # Désactive les commits automatiques
+gitignore: false               # Ne pas modifier le .gitignore
+dark-mode: true                # Pour le confort visuel dans Cmder
+map-tokens: 1024               # Taille de la "carte" du projet envoyée à l'IA
+read:
+  - %USERPROFILE%\.aider.instructions.md # Pour spécifier un chemin ou nom de fichier non conventionnel
+```
+
+## 🎨 Le guide de style : .aider.instruction.md
+
+C'est le fichier "cerveau" pour l'ouvrier **Aider**. 
+Il définit comment le code doit être écrit. 
+Aider le lit à chaque fois qu'il s'apprête à modifier un fichier.
+
+- Rôle : Imposer des standards de codage, des règles architecturales ou des conventions de nommage.
+- Emplacement : Racine du projet (pour une configuration plus globale, préciser le chemin avec l'option **read** dans `.aider.conf.yml`)
+- Fonctionnement : Son contenu est ajouté au "System Prompt". Si Gemini (l'architecte) donne une instruction floue, Aider utilisera ce fichier pour trancher.
+
+À chaque initialisation, **Aider** recherche à la racine du projet un fichier nommé `.aider.instruction.md`,
 dont il charge les directives en tant que **System Prompt** qui s'ajoute au message.
 
 La répartition des rôles entre **Gemini** et **Aider** devient donc celle-ci :
