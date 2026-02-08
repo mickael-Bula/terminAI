@@ -427,6 +427,10 @@ Il suffit de saisir l'alias (**glogi** ici) dans le terminal :
 
 ```bash
 $ glogi
+```
+Un exemple d'interaction :
+
+```text
 === ASSISTANT DE CONTEXTE GEMINI ===
 Votre question / instruction : "Modifie le controller HomeController et sa vue de manière à afficher le calcul de la TVA en utilisant le service VatCalculator"                               
                                                                                                                                                                                               
@@ -448,4 +452,54 @@ Fichier à ajouter (TAB pour compléter, Entrée pour terminer) :
 1. ANALYSE :                                                                                                                                                                                  
                                                                                                                                                                                               
 Le code du contrôleur `HomeController` est déjà très moderne
-...
+```
+
+## Ajout d'un résumé glissant
+
+Pour pallier les limites de la "fenêtre de contexte" (la mémoire immédiate) et fournir une mémoire normative,
+j'ajoute la génération d'un résumé par l'IA après chaque réponse fournie, 
+que j'ajoute ensuite au début de chaque nouvelle question.
+
+Il s'agit d'un prompt déclarant certaine règle à appliquer pour générer le résumé :
+
+```markdown
+Tu dois maintenir une mémoire de travail normative servant de source de vérité
+pour la suite de la conversation.
+
+Cette mémoire :
+- remplace tout l’historique précédent
+- est considérée comme exacte et contraignante
+- doit rester concise, stable et actionnable
+
+TÂCHE
+À partir de TA DERNIÈRE RÉPONSE, mets à jour la mémoire de travail ci-dessous
+en produisant UNIQUEMENT un PATCH YAML minimal.
+
+RÈGLES STRICTES
+- Ne réécris JAMAIS la mémoire complète
+- N’ajoute que les informations NOUVELLES ou MODIFIÉES
+- Supprime toute information devenue fausse, obsolète ou invalidée
+- Ne reformule pas ce qui reste vrai
+- Ne déduis rien qui n’est pas explicitement établi
+- Toute décision explicite doit aller dans decisions.confirmed ou decisions.rejected
+- Les détails d’implémentation ne doivent PAS être stockés
+- Chaque item doit tenir sur UNE phrase courte
+
+FORMAT DE SORTIE
+- YAML valide uniquement
+- Racine : patch
+- Sections autorisées : add, update, remove
+- AUCUN texte hors du YAML
+
+MÉMOIRE DE TRAVAIL ACTUELLE
+<<<SUMMARY>>>
+
+PRODUIS LE PATCH YAML MAINTENANT.
+```
+
+La réponse devant être donnée au format YAML, il faut donc importer le paquet pyYAML pour nettoyer celle-ci :
+
+```bash
+c:\laragon\bin\python\python-3.10\python.exe -m pip install pyYAML
+```
+

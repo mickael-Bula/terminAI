@@ -36,7 +36,7 @@ volumes:
 ## Lancement du container
 
 ```bash
-$docker compose up -d
+$ docker compose up -d
 ```
 
 ## Rendre la base vectorielle
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS chat_history (
     id SERIAL PRIMARY KEY,
     content TEXT,                -- Le texte du message (le bloc de l'historique)
     metadata JSONB,              -- Pour stocker la date, le prompt original, etc.
-    embedding vector(768)       -- Vecteur (Note: 768 pour Gemini embedding-004)
+    embedding vector(768)       -- Vecteur (Note: 768 pour Gemini embedding-001)
 );
 
 -- Index pour accélérer la recherche de proximité
@@ -119,3 +119,51 @@ Toutes les modifications se trouvent dans le script `geni.py`.
 ;= rem alias qui interroge l'IA en lui fournissant un contexte ciblé
 geni=%PYTHON_BIN% %LOCAL_BIN%\geni.py
 ```
+
+## Création d'une base de données vextorielle dans un LXC Proxmox
+
+## Création d'une base de données vectorielle sur le serveur LXC :
+
+$ pct enter 102
+> sudo -u postgres psql -c "SELECT version();"	# PostgreSQL 16.11 (Debian 16.11-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+
+### installer pgvector
+> apt update
+> apt install postgresql-16-pgvector
+
+#### Se connecter en tant qu'utilisateur postgres
+sudo -u postgres psql
+
+#### ACTIVER L'EXTENSION
+pgsql# CREATE EXTENSION vector;
+
+#### Vérifier le résultat
+pgsql# SELECT * FROM pg_extension WHERE extname = 'vector';
+
+#### (Optionnel) Créer la base si ce n'est pas fait
+pgsql# CREATE DATABASE gemini_history;
+
+#### Se connecter à la base
+pgsql# \c gemini_history
+
+#### Créer la table
+pgsql# CREATE TABLE chat_history (id SERIAL PRIMARY KEY, content TEXT, content_hash VARCHAR(64) UNIQUE, embedding vector(768), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+
+pgsql# CREATE INDEX ON chat_history USING hnsw (embedding vector_cosine_ops);
+
+#### Créer le User et donner les droits
+-- Dans le LXC : sudo -u postgres psql
+pgsql# CREATE USER bulam WITH PASSWORD 'ton_password';
+pgsql# GRANT ALL PRIVILEGES ON DATABASE gemini_history TO bulam;
+pgsql# GRANT ALL ON SCHEMA public TO bulam; -- Nécessaire pour créer/lire les tables
+
+### Ou modifier les droits
+-- Donne la propriété de la table à bulam
+ALTER TABLE chat_history OWNER TO bulam;
+
+-- Donne les droits sur les séquences (pour l'ID auto-incrémenté)
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bulam;
+
+-- (Optionnel, mais recommandé) Donne les droits par défaut pour le futur
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bulam;
+
