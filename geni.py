@@ -73,6 +73,19 @@ def spinner_task(stop_event):
     print("\r" + " " * 30 + "\r", end="", flush=True)
 
 
+def get_repo_map():
+    """Génère ou récupère la carte du projet via Aider."""
+    try:
+        # On demande à aider de générer la map (silencieusement)
+        result = subprocess.run(
+            ["aider", "--show-repo-map"],
+            capture_output=True, text=True, encoding='utf-8'
+        )
+        return result.stdout
+    except subprocess.SubprocessError:
+        return "Impossible de générer le repo-map."
+
+
 # --- Fonction Principale ---
 
 def run():
@@ -126,6 +139,9 @@ def run():
         except Exception as e:
             print(f"  [!] Erreur : {e}")
 
+    # --- Récupération du repo_map d'Aider ---
+    repo_map = get_repo_map()
+
     # --- Récupération Mémoires ---
     summary_content = "Aucun résumé disponible."
     if os.path.exists("resume_contexte.yaml"):
@@ -133,12 +149,10 @@ def run():
             summary_content = f.read()
 
     print("\n🔍 Consultation de la mémoire à long terme...")
-    context_vectoriel = ""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         client = genai.Client(api_key=api_key)
 
-        # Correction : Utilisation du modèle d'embedding validé
         res = client.models.embed_content(
             model="models/gemini-embedding-001",
             contents=main_prompt,
@@ -146,7 +160,6 @@ def run():
         )
         embedding = res.embeddings[0].values
 
-        # Correction : Utilisation propre de DB_CONFIG
         conn = psycopg2.connect(**DB_CONFIG)
         register_vector(conn)
         cur = conn.cursor()
@@ -162,7 +175,12 @@ def run():
 
     # --- Construction du Prompt Final ---
     files_context_string = "\n\n".join(context_blocks)
-    full_prompt = f"""[CONTEXTE_STRUCTUREL_YAML]
+    full_prompt = f"""
+[STRUCTURE_DU_PROJET]
+{repo_map}
+[/STRUCTURE_DU_PROJET]
+
+[CONTEXTE_STRUCTUREL_YAML]
 {summary_content}
 [/CONTEXTE_STRUCTUREL_YAML]
 

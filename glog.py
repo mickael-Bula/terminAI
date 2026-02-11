@@ -24,7 +24,7 @@ DB_CONFIG = {
 
 
 def index_interaction(full_text):
-    """Calcule le hash, l'embedding et insère dans Postgres (Port 5433)."""
+    """Calcule le hash, l'embedding et insère dans Postgres."""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
 
