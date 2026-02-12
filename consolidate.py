@@ -69,9 +69,7 @@ RÈGLES :
 """
 
     print(f"📡 Envoi au modèle Lite pour résumé...")
-    print(f"📡 Tentative de résumé (Modèle 1.5 Flash)...")
     try:
-        # On essaie d'abord le modèle 1.5 pour économiser le quota du 2.0
         response = client.models.generate_content(
             model='gemini-flash-latest',
             contents=prompt_consolidation
