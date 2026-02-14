@@ -38,7 +38,7 @@ J'ai ici choisi le dossier `C:\Users\bulam\.local\bin`.
 
 ## 🧠 Fichier de prompt système
 
-Pour que Gemini reste focalisé sur certains principes, sans avoir à les lui répéter constamment,
+Pour que l'IA reste focalisé sur certains principes, sans avoir à les lui répéter constamment,
 il est possible de lui fournir un fichier `prompt_system.txt`, contenant les directives. Par exemple :
 
 ```txt
@@ -56,7 +56,7 @@ Dans cette section, donne des instructions directes et techniques que l'outil Ai
 Sois précis et technique. Évite les bavardages inutiles.
 ```
 
-Ce fichier **Prompt System** est importé à chaque appel du scrfipt **ask.py**, 
+Ce fichier **Prompt System** est importé à chaque appel du script **ask.py**, 
 dans lequel un chemin par défaut a été ajouté : `C:\Users\mon_user\.local\bin\prompt_system.txt`.
 
 ##⚡Étape 4 : Création de la commande gemini (Alias Cmder) 
@@ -160,7 +160,7 @@ $ aider src/Controller/OldController.php --message "$(cat dernier_plan.md)"
 ```
 
 Pour que **Gemini** produise un résultat exploitable par **Aider**, 
-un fichier de contexte global `prompt_system.txt` est ajouté. Ce fichier est modifiable selon le contexte.
+le fichier de contexte global `prompt_system.txt` est peut-être modifié pour coller au contexte.
 Par exemple :
 
 ```text
@@ -323,7 +323,8 @@ C'est ici que les préférences sont enregistrées pour ne plus avoir à saisir 
 - Exemple de contenu pour ton workflow :
 
 ```yaml
-model: gemini/gemini-2.0-flash # On peut forcer le modèle ici
+model: gemini/gemini-2.0-flash # On choisit le modèle ici
+weak-model: openrouter/google/google/gemini-2.5-flash-lite # Pour les tâches plus simples, comme créer le repo-map
 auto-commits: false            # Désactive les commits automatiques
 gitignore: false               # Ne pas modifier le .gitignore
 dark-mode: true                # Pour le confort visuel dans Cmder
@@ -349,6 +350,7 @@ La répartition des rôles entre **Gemini** et **Aider** devient donc celle-ci :
 
 **glog** (Gemini) : C'est l'architecte qui analyse le code, 
 réfléchit à la stratégie et produit le fichier `dernier_plan.md`. 
+On lui fournit le fichier `prompt_system` lors de chaque appel et qui fait office de prompt normatif.
 Il n'a pas connaissance du fichier `.aider.instructions.md` (à moins de le lui donner explicitement).
 
 **ago** (Aider) : C'est l'ouvrier spécialisé. 
@@ -414,19 +416,19 @@ il faut installer la librairie pyreadline3 :
 pip install pyreadline3
 ```
 
-Le script peut être appelé depuis un alias, par exemple **glogi** :
+Le script peut être appelé depuis un alias, par exemple **geni** :
 
 ```cmd
 :: alias interrogeant l'IA de manière interractive
-glogi=%PYTHON_BIN% %LOCAL_BIN%\glog_interactive.py
+geni=%PYTHON_BIN% %LOCAL_BIN%\glog_interactive.py
 ```
 
 ## Utilisation de l'alias
 
-Il suffit de saisir l'alias (**glogi** ici) dans le terminal :
+Il suffit de saisir l'alias (**geni** ici) dans le terminal :
 
 ```bash
-$ glogi
+$ geni
 ```
 Un exemple d'interaction :
 
@@ -501,5 +503,49 @@ La réponse devant être donnée au format YAML, il faut donc importer le paquet
 
 ```bash
 c:\laragon\bin\python\python-3.10\python.exe -m pip install pyYAML
+```
+
+## Liste de modèles
+
+Pour gérer au mieux les tokens disponibles,
+une solution est d'installer OpenRouter, 
+qui permet d'accéder à de multiples modèles à partir d'une seule clé API.
+Pour obtenir celle-ci, il suffit de s'inscrire depuis https://openrouter.ai/
+
+L'utilisation dans un script se fait simplement :
+
+```python
+import os
+from openai import OpenAI
+
+# 1. --- Instancie un client auprès d'OpenRouter après authentification
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY")  # récupère la clé depuis un fichier .env
+)
+# 2. --- On boucle sur les modèles pour trouver le premier disponible ---
+# Pile de modèles pour la PLANIFICATION
+models = ["deepseek/deepseek-r1",
+          "google/gemini-3-pro",
+          "google/gemini-2.0-flash",
+          "meta-llama/llama-3.3-70b-instruct",
+          "openrouter/auto"]
+
+user_prompt = 'Une question'
+
+for model_name in models:
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=0.7  # Un peu de créativité pour la planification
+        )
+
+        raw_content = response.choices[0].message.content
+    except Exception as e:
+        if "429" in str(e):
+            print(f"⚠️ Quota plein pour {model_name}, essai suivant...")
+            continue
+        raise e
 ```
 

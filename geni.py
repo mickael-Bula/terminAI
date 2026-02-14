@@ -56,9 +56,18 @@ def find_file_recursive(filename):
 
 def extract_single_range(lines, r_string, file_path):
     try:
+        # Déterminer le langage pour la coloration (optionnel, mais recommandé)
+        lang = "php" if file_path.endswith('.php') else ""
         start, end = map(int, r_string.split('-'))
         part = lines[start - 1:end]
-        return f"--- {file_path} (Lignes {r_string}) ---\n" + "".join(part)
+
+        # On ajoute les triples backticks avant et après le contenu
+        return (
+            f"--- {file_path} (Lignes {r_string}) ---\n"
+            f"```{lang}\n"
+            f"{''.join(part)}"
+            f"```\n"
+        )
     except Exception as e:
         return f"  [!] Erreur sur la plage {r_string}: {e}"
 
@@ -67,7 +76,7 @@ def spinner_task(stop_event):
     chars = ['|', '/', '-', '\\']
     idx = 0
     while not stop_event.is_set():
-        print(f"\r[Gemini réfléchit...] {chars[idx % len(chars)]}", end="", flush=True)
+        print(f"\r[Le modèle réfléchit...] {chars[idx % len(chars)]}", end="", flush=True)
         idx += 1
         time.sleep(0.1)
     print("\r" + " " * 30 + "\r", end="", flush=True)
@@ -89,7 +98,7 @@ def get_repo_map():
 # --- Fonction Principale ---
 
 def run():
-    print("=== ASSISTANT GEMINI (Fichiers + Mémoire + YAML) ===")
+    print("=== ASSISTANT IA (Fichiers + Mémoire + YAML) ===")
 
     main_prompt = input("\nVotre question : ").strip()
     if not main_prompt:
@@ -182,7 +191,7 @@ def run():
 
 [CONTEXTE_STRUCTUREL_YAML]
 {summary_content}
-[/CONTEXTE_STRUCTUREL_YAML]
+[/CONTEXTE_STRUCTUREL_YAML
 
 [CONTEXTE_FICHIERS]
 {files_context_string}
@@ -195,7 +204,7 @@ def run():
 QUESTION_UTILISATEUR : {main_prompt}"""
 
     # --- Envoi STDIN ---
-    print("\n🚀 Envoi à Gemini...")
+    print("\n🚀 Envoi au modèle...")
     stop_spinner = threading.Event()
     spinner_thread = threading.Thread(target=spinner_task, args=(stop_spinner,))
 

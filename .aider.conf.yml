@@ -1,0 +1,19 @@
+# Déclare un modèle pour les tâches complexes et un autre pour les tâches simples
+model: openrouter/google/gemini-2.0-flash-001
+weak-model: openrouter/google/google/gemini-2.5-flash-lite
+
+# Chemin vers la clé API d'Open Router
+env-file: .env
+
+# Options Aider passée depuis ce fichier
+gitignore: false
+auto-commits: false
+dark-mode: true
+
+# Taille du repo-map d'Aider
+map-tokens: 4096
+attribute-author: false
+
+# Chemin vers le prompt normatif d'Aider
+read:
+  - .aider.instructions.md

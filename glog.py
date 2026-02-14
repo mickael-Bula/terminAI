@@ -4,11 +4,13 @@ import datetime
 import os
 import hashlib
 import re
+import openai
 
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from psycopg2.extensions import cursor
 from google import genai
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,7 +43,7 @@ def index_interaction(full_text):
         register_vector(conn)
         cur: cursor = conn.cursor()
 
-        # 3. Vérification si déjà indexé
+        # 3. On s'assure que le contenu n'est pas déjà indexé.
         cur.execute("SELECT id FROM chat_history WHERE content_hash = %s", (content_hash,))
         if cur.fetchone():
             cur.close()
@@ -71,8 +73,18 @@ def index_interaction(full_text):
 
 
 def update_global_summary(user_query_only, ai_response_only):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv("OPENROUTER_API_KEY")
+    )
+
+    # Pile de modèles pour l'ARCHIVAGE (Priorité au Gratuit)
+    archive_models = [
+        "mistralai/mistral-saba",
+        "google/gemini-2.5-flash-lite-preview-09-2025",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "openrouter/auto"
+    ]
 
     summary_file = 'resume_contexte.yaml'
 
@@ -129,14 +141,36 @@ GÉNÈRE MAINTENANT LE RÉSUMÉ CONSOLIDÉ EN YAML.
     """
 
     try:
-        response = client.models.generate_content(model='gemini-flash-latest', contents=prompt_consolidation)
+        for model in archive_models:
+            try:
+                # Envoi du prompt de consolidation YAML
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": "Tu es un archiviste YAML."},
+                              {"role": "user", "content": prompt_consolidation}],
+                    temperature=0.1  # On baisse la température pour plus de rigueur
+                )
 
-        # Nettoyage si Gemini met des blocs ```yaml
-        clean_yaml = response.text.replace('```yaml', '').replace('```', '').strip()
+                # Récupère le contenu brut depuis la structure d'OpenAI
+                raw_content = response.choices[0].message.content
 
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            f.write(clean_yaml)
-        print("📊 Mémoire normative (YAML) consolidée.")
+                # Nettoyage si le modèle met des balises Markdown
+                clean_yaml = raw_content.replace('```yaml', '').replace('```', '').strip()
+
+                with open(summary_file, 'w', encoding='utf-8') as f:
+                    f.write(clean_yaml)
+                print("📊 Mémoire normative (YAML) consolidée.")
+
+                return
+            except (openai.RateLimitError, openai.APIConnectionError,
+                    openai.APITimeoutError, openai.APIError) as e:
+                # Ici, on ne capture que les erreurs liées à l'API pour tenter le modèle suivant
+                print(f"⚠️ Échec API avec {model} ({type(e).__name__}), tentative avec le suivant...")
+                continue
+            except OSError as e:
+                # Erreur d'écriture de fichier (ex : permissions), inutile de changer de modèle IA
+                print(f"❌ Erreur disque : {e}")
+                break
 
     except Exception as e:
         error_msg = str(e)
@@ -161,16 +195,15 @@ def run():
         except Exception as e:
             print(f"Erreur lors de la création du dossier {local_bin} : {e}")
 
-    # 2. Récupérer le prompt
-    if not sys.stdin.isatty():
-        # Si on reçoit des données via un pipe (depuis glog_interactive)
-        prompt = sys.stdin.read()
-    else:
-        # Si on appelle glog "en direct" dans le terminal
-        prompt = " ".join(sys.argv[1:])
+    # 2. Récupérer le prompt (La question utilisateur)
+    user_question = " ".join(sys.argv[1:])  # On distingue la question (argv) du contexte lourd (stdin).
 
-    if not prompt:
-        print("Erreur : Aucun prompt fourni.")
+    context_data = ""
+    if not sys.stdin.isatty():
+        context_data = sys.stdin.read()
+
+    if not user_question and not context_data:
+        print("Erreur : Aucun contenu fourni.")
         return
 
     # Configuration des chemins
@@ -182,45 +215,53 @@ def run():
     # 3. Préparer l'en-tête de l'historique
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     divider = "=" * 50
-    header = f"\n{divider}\nDATE   : {timestamp}\nPROMPT : {prompt}\n{'-' * 50}\n"
+    header = f"\n{divider}\nDATE   : {timestamp}\nPROMPT : {user_question}\n{'-' * 50}\n"
 
     # 4. Exécuter ask.py et capturer la sortie
     # stdin=sys.stdin permet de transmettre le flux (ex : cat fichier | glog)
     try:
         result = subprocess.run(
-            [python_bin, ask_script, prompt],
+            [python_bin, ask_script, user_question],
+            input=context_data,  # On transmet le flux ici
             capture_output=True,
             text=True,
-            encoding='utf-8',
-            stdin=sys.stdin
+            encoding='utf-8'
         )
 
         if result.returncode != 0:
-            # On affiche l'erreur sur le flux d'erreur standard
-            print(f"Erreur lors de l'exécution de Gemini :\n{result.stderr}", file=sys.stderr)
+            # Si ask.py a fait un sys.exit(1), on s'arrête ici et on affiche l'erreur envoyée sur stderr.
+            print(f"\n[ABORT] L'IA n'a pas pu répondre :\n{result.stderr}", file=sys.stderr)
             return
 
-        # 5. Écrire dans dernier_plan.md et historique_global.md
-        content = result.stdout
+        # 5. Préparer le bloc complet EN MÉMOIRE d'abord (Write Once Logic)
+        ai_response = result.stdout
 
-        # Préparation du bloc complet pour l'historique et l'indexation
-        full_entry = f"{header}{content}\n"
+        # On ne crée la chaîne finale QUE si on a bien reçu une réponse
+        full_entry = f"{header}{ai_response}\n"
 
-        # Écritures fichiers
-        with open(plan_file, 'w', encoding='utf-8') as p:
-            p.write(content)
+        # Écriture atomique : On ouvre, on écrit tout le bloc, on ferme immédiatement.
+        try:
+            # Mise à jour du dernier plan (écrase le précédent)
+            with open(plan_file, 'w', encoding='utf-8') as p:
+                p.write(ai_response)
 
-        with open(hist_file, 'a', encoding='utf-8') as h:
-            h.write(full_entry)
+            # Ajout à l'historique global (ajoute à la fin)
+            # En écrivant 'full_entry' d'un coup, on évite d'avoir un header sans réponse
+            with open(hist_file, 'a', encoding='utf-8') as h:
+                h.write(full_entry)
+
+        except OSError as e:
+            print(f"❌ Erreur critique lors de l'écriture des fichiers : {e}")
+            return  # On arrête tout si le disque est plein ou protégé
 
         # 6. Afficher le résultat dans le terminal
-        print(content)
+        print(ai_response)
 
         # --- AUTO-INDEXATION VECTORIELLE ---
         index_interaction(full_entry)
 
         # --- GENERATION DU RESUME ---
-        update_global_summary(prompt, content)
+        update_global_summary(user_question, ai_response)
 
     except Exception as e:
         print(f"Une erreur système est survenue : {e}")
