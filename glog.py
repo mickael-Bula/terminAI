@@ -4,18 +4,17 @@ import datetime
 import os
 import hashlib
 import re
-import openai
-
+import time
 import psycopg2
 from pgvector.psycopg2 import register_vector
-from psycopg2.extensions import cursor
 from google import genai
 from openai import OpenAI
 from dotenv import load_dotenv
 
+# --- INITIALISATION ---
 load_dotenv()
 
-# Configuration de la base de données
+# Configuration DB
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT"),
@@ -24,80 +23,71 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 
+# Configuration Chemins
+LOCAL_BIN = os.environ.get('LOCAL_BIN', os.path.expanduser(r'~\.local\bin'))
+ASK_SCRIPT = os.path.join(LOCAL_BIN, 'ask.py')
+PYTHON_BIN = os.environ.get('PYTHON_BIN', 'python')
+
+
+# --- FONCTIONS DE SERVICE ---
 
 def index_interaction(full_text):
     """Calcule le hash, l'embedding et insère dans Postgres."""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-
-        if not api_key:
-            return  # Pas d'API key, on ignore l'indexation
+        if not api_key: return
 
         client = genai.Client(api_key=api_key)
-
-        # 1. Calcul de l'empreinte unique (Hash)
         content_hash = hashlib.md5(full_text.encode('utf-8')).hexdigest()
 
-        # 2. Connexion Postgres
-        conn = psycopg2.connect(**DB_CONFIG)
-        register_vector(conn)
-        cur: cursor = conn.cursor()
+        with psycopg2.connect(**DB_CONFIG) as conn:
+            register_vector(conn)
+            with conn.cursor() as cur:
+                # Vérification unicité
+                cur.execute("SELECT id FROM chat_history WHERE content_hash = %s", (content_hash,))
+                if cur.fetchone(): return
 
-        # 3. On s'assure que le contenu n'est pas déjà indexé.
-        cur.execute("SELECT id FROM chat_history WHERE content_hash = %s", (content_hash,))
-        if cur.fetchone():
-            cur.close()
-            conn.close()
-            return
+                # Génération Embedding
+                res = client.models.embed_content(
+                    model="models/gemini-embedding-001",
+                    contents=full_text,
+                    config={'output_dimensionality': 768}
+                )
 
-        # 4. Génération de l'Embedding
-        res = client.models.embed_content(
-            model="models/gemini-embedding-001",
-            contents=full_text,
-            config={'output_dimensionality': 768}
-        )
-        embedding = res.embeddings[0].values
-
-        # 5. Insertion
-        cur.execute(
-            "INSERT INTO chat_history (content, content_hash, embedding) VALUES (%s, %s, %s)",
-            (full_text, content_hash, embedding)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("\n✅ Mémoire vectorielle synchronisée.")
+                cur.execute(
+                    "INSERT INTO chat_history (content, content_hash, embedding) VALUES (%s, %s, %s)",
+                    (full_text, content_hash, res.embeddings[0].values)
+                )
+        print("✅ Mémoire vectorielle synchronisée.")
     except Exception as e:
-        # On affiche juste un avertissement pour ne pas bloquer le flux principal
-        print(f"\n⚠️ Note: Échec de l'indexation vectorielle ({e})")
+        print(f"⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})", file=sys.stderr)
 
 
-def update_global_summary(user_query_only, ai_response_only):
+def update_global_summary(user_query, ai_response):
+    """Consolide la mémoire normative YAML avec basculement intelligent."""
+    # Petite pause pour éviter le Rate Limit (429) juste après la réponse principale
+    time.sleep(1)
+
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY")
     )
 
-    # Pile de modèles pour l'ARCHIVAGE (Priorité au Gratuit)
+    # Pile de modèles pour la consolidation
     archive_models = [
-        "mistralai/mistral-saba",
-        "google/gemini-2.5-flash-lite-preview-09-2025",
+        "google/gemini-2.0-flash-001",
+        "google/gemini-2.0-flash-lite-001",
         "qwen/qwen-2.5-72b-instruct:free",
         "openrouter/auto"
     ]
 
     summary_file = 'resume_contexte.yaml'
 
-    # On charge l'ancienne mémoire
     if os.path.exists(summary_file):
         with open(summary_file, 'r', encoding='utf-8') as f:
             old_summary = f.read()
     else:
         old_summary = "summary: {objective: 'Initialisation', decisions: {confirmed: [], rejected: []}}"
-
-        # Au besoin, on tronque la réponse IA pour économiser les tokens et éviter le 429
-        ai_response = ai_response_only[:4000] + "\n[...TRONQUÉ...]"
-        ai_response_only = ai_response if len(ai_response_only) > 4000 else ai_response_only
 
     prompt_consolidation = f"""
 Tu dois consolider la mémoire normative utilisée pour la conversation.
@@ -130,141 +120,91 @@ FORMAT DE SORTIE
   - next_actions
 - Aucun texte hors YAML
 
-MÉMOIRE ACTUELLE
+MÉMOIRE ACTUELLE :
 {old_summary}
 
-DERNIÈRE INTERACTION
-Utilisateur : {user_query_only}
-IA : {ai_response_only}
+DERNIÈRE INTERACTION :
+Utilisateur : {user_query}
+IA : {ai_response[:2000]}
+"""
 
-GÉNÈRE MAINTENANT LE RÉSUMÉ CONSOLIDÉ EN YAML.
-    """
+    for model in archive_models:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": "Tu es un archiviste YAML."},
+                          {"role": "user", "content": prompt_consolidation}],
+                temperature=0.1
+            )
+            raw = response.choices[0].message.content
+            clean_yaml = re.sub(r'```yaml|```', '', raw).strip()
 
-    try:
-        for model in archive_models:
-            try:
-                # Envoi du prompt de consolidation YAML
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": "Tu es un archiviste YAML."},
-                              {"role": "user", "content": prompt_consolidation}],
-                    temperature=0.1  # On baisse la température pour plus de rigueur
-                )
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(clean_yaml)
+            print("📊 Mémoire normative (YAML) consolidée.")
+            return
+        except Exception as e:
+            # Plus de transparence sur l'échec de consolidation
+            err_msg = str(e)
+            print(f"⚠️ Échec consolidation avec {model} : {err_msg[:60]}...", file=sys.stderr)
+            continue
 
-                # Récupère le contenu brut depuis la structure d'OpenAI
-                raw_content = response.choices[0].message.content
 
-                # Nettoyage si le modèle met des balises Markdown
-                clean_yaml = raw_content.replace('```yaml', '').replace('```', '').strip()
-
-                with open(summary_file, 'w', encoding='utf-8') as f:
-                    f.write(clean_yaml)
-                print("📊 Mémoire normative (YAML) consolidée.")
-
-                return
-            except (openai.RateLimitError, openai.APIConnectionError,
-                    openai.APITimeoutError, openai.APIError) as e:
-                # Ici, on ne capture que les erreurs liées à l'API pour tenter le modèle suivant
-                print(f"⚠️ Échec API avec {model} ({type(e).__name__}), tentative avec le suivant...")
-                continue
-            except OSError as e:
-                # Erreur d'écriture de fichier (ex : permissions), inutile de changer de modèle IA
-                print(f"❌ Erreur disque : {e}")
-                break
-
-    except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg:
-            print("\n❌ QUOTA ÉPUISÉ POUR AUJOURD'HUI.")
-            # Extraction du temps d'attente suggéré par Google
-            wait_match = re.search(r"retry in ([\d\.]+)s", error_msg)
-            if wait_match:
-                print(f"💡 Google suggère d'attendre {wait_match.group(1)} secondes.")
-            print("👉 Conseil : Change de clé API ou attends demain pour la consolidation.")
-        else:
-            print(f"❌ Erreur API : {e}")
-
+# --- LOGIQUE PRINCIPALE ---
 
 def run():
-    # 1. Vérification et création du dossier de scripts si nécessaire
-    # On récupère le chemin depuis l'environnement ou on utilise celui par défaut
-    local_bin = os.environ.get('LOCAL_BIN', r'C:\Users\bulam\.local\bin')
-    if not os.path.exists(local_bin):
-        try:
-            os.makedirs(local_bin, exist_ok=True)
-        except Exception as e:
-            print(f"Erreur lors de la création du dossier {local_bin} : {e}")
-
-    # 2. Récupérer le prompt (La question utilisateur)
-    user_question = " ".join(sys.argv[1:])  # On distingue la question (argv) du contexte lourd (stdin).
-
-    context_data = ""
-    if not sys.stdin.isatty():
-        context_data = sys.stdin.read()
+    # 1. Collecte des entrées (Arguments + Pipe)
+    user_question = " ".join(sys.argv[1:])
+    context_data = sys.stdin.read() if not sys.stdin.isatty() else ""
 
     if not user_question and not context_data:
-        print("Erreur : Aucun contenu fourni.")
+        print("❌ Erreur : Aucun contenu fourni.")
         return
 
-    # Configuration des chemins
-    ask_script = os.environ.get('ASK_SCRIPT', os.path.join(local_bin, 'ask.py'))
-    python_bin = os.environ.get('PYTHON_BIN', 'python')
-    hist_file = 'historique_global.md'
-    plan_file = 'dernier_plan.md'
-
-    # 3. Préparer l'en-tête de l'historique
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    divider = "=" * 50
-    header = f"\n{divider}\nDATE   : {timestamp}\nPROMPT : {user_question}\n{'-' * 50}\n"
-
-    # 4. Exécuter ask.py et capturer la sortie
-    # stdin=sys.stdin permet de transmettre le flux (ex : cat fichier | glog)
+    # 2. Exécution de ask.py
     try:
         result = subprocess.run(
-            [python_bin, ask_script, user_question],
-            input=context_data,  # On transmet le flux ici
-            capture_output=True,
+            [PYTHON_BIN, ASK_SCRIPT, user_question],
+            input=context_data,
+            stdout=subprocess.PIPE,
+            stderr=None,  # Stream direct du spinner et du debug de ask.py
             text=True,
             encoding='utf-8'
         )
 
         if result.returncode != 0:
-            # Si ask.py a fait un sys.exit(1), on s'arrête ici et on affiche l'erreur envoyée sur stderr.
-            print(f"\n[ABORT] L'IA n'a pas pu répondre :\n{result.stderr}", file=sys.stderr)
+            print(f"\n[ABORT] L'IA a rencontré une erreur fatale.", file=sys.stderr)
             return
 
-        # 5. Préparer le bloc complet EN MÉMOIRE d'abord (Write Once Logic)
-        ai_response = result.stdout
+        ai_response = result.stdout.strip()
+        if not ai_response:
+            print("⚠️ Réponse vide reçue de l'IA.")
+            return
 
-        # On ne crée la chaîne finale QUE si on a bien reçu une réponse
+        # 3. Écriture des fichiers de sortie
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = f"\n{'=' * 50}\nDATE   : {timestamp}\nPROMPT : {user_question}\n{'-' * 50}\n"
         full_entry = f"{header}{ai_response}\n"
 
-        # Écriture atomique : On ouvre, on écrit tout le bloc, on ferme immédiatement.
         try:
-            # Mise à jour du dernier plan (écrase le précédent)
-            with open(plan_file, 'w', encoding='utf-8') as p:
+            with open('dernier_plan.md', 'w', encoding='utf-8') as p:
                 p.write(ai_response)
 
-            # Ajout à l'historique global (ajoute à la fin)
-            # En écrivant 'full_entry' d'un coup, on évite d'avoir un header sans réponse
-            with open(hist_file, 'a', encoding='utf-8') as h:
+            with open('historique_global.md', 'a', encoding='utf-8') as h:
                 h.write(full_entry)
-
         except OSError as e:
-            print(f"❌ Erreur critique lors de l'écriture des fichiers : {e}")
-            return  # On arrête tout si le disque est plein ou protégé
+            print(f"❌ Erreur disque : {e}", file=sys.stderr)
+            return
 
-        # 6. Afficher le résultat dans le terminal
+        # 4. Affichage final et tâches de fond
         print(ai_response)
 
-        # --- AUTO-INDEXATION VECTORIELLE ---
+        # Lancement des indexations et résumés
         index_interaction(full_entry)
-
-        # --- GENERATION DU RESUME ---
         update_global_summary(user_question, ai_response)
 
     except Exception as e:
-        print(f"Une erreur système est survenue : {e}")
+        print(f"❌ Erreur système : {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
