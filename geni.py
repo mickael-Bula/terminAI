@@ -1,15 +1,24 @@
 import os
 import subprocess
-import glob
-import threading
-import time
 import sys
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from google import genai
 from dotenv import load_dotenv
 
+# --- Importations Saisie (prompt_toolkit) ---
+from prompt_toolkit import prompt
+from prompt_toolkit.completion import PathCompleter
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.styles import Style
+
+# --- Importations Design (rich) ---
+from rich.console import Console
+from rich.console import Group
+from rich.panel import Panel
+
 # --- Initialisation ---
+console = Console()
 load_dotenv()
 
 # --- Configuration et Chemins ---
@@ -22,25 +31,6 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 PYTHON_BIN = sys.executable
-
-# --- Configuration de l'auto-complétion ---
-try:
-    import readline
-
-
-    def completer(text, state):
-        options = glob.glob(text + '*')
-        if state < len(options):
-            option = options[state]
-            return option + os.sep if os.path.isdir(option) else option
-        return None
-
-
-    readline.set_completer(completer)
-    readline.parse_and_bind("tab: complete")
-    readline.set_completer_delims(' \t\n;')
-except ImportError:
-    readline = None
 
 
 # --- Fonctions Utilitaires ---
@@ -56,36 +46,16 @@ def find_file_recursive(filename):
 
 def extract_single_range(lines, r_string, file_path):
     try:
-        # Déterminer le langage pour la coloration (optionnel, mais recommandé)
-        lang = "php" if file_path.endswith('.php') else ""
         start, end = map(int, r_string.split('-'))
         part = lines[start - 1:end]
-
-        # On ajoute les triples backticks avant et après le contenu
-        return (
-            f"--- {file_path} (Lignes {r_string}) ---\n"
-            f"```{lang}\n"
-            f"{''.join(part)}"
-            f"```\n"
-        )
+        return f"--- {file_path} (Lignes {r_string}) ---\n" + "".join(part)
     except Exception as e:
         return f"  [!] Erreur sur la plage {r_string}: {e}"
-
-
-def spinner_task(stop_event):
-    chars = ['|', '/', '-', '\\']
-    idx = 0
-    while not stop_event.is_set():
-        print(f"\r[Le modèle réfléchit...] {chars[idx % len(chars)]}", end="", flush=True)
-        idx += 1
-        time.sleep(0.1)
-    print("\r" + " " * 30 + "\r", end="", flush=True)
 
 
 def get_repo_map():
     """Génère ou récupère la carte du projet via Aider."""
     try:
-        # On demande à aider de générer la map (silencieusement)
         result = subprocess.run(
             ["aider", "--show-repo-map"],
             capture_output=True, text=True, encoding='utf-8'
@@ -95,19 +65,64 @@ def get_repo_map():
         return "Impossible de générer le repo-map."
 
 
+def get_user_input():
+    style = Style.from_dict({
+        'prompt': '#00ffff bold',
+    })
+
+    console.print(Panel(
+        "[bold white]Mode interactif[/bold white]\n[dim]Alt+Entrée pour valider | Ctrl+C pour quitter[/dim]",
+        title="[cyan] ASSISTANT IA (Fichiers + Mémoire + YAML) [/cyan]",
+        title_align="left",
+        border_style="cyan",
+        expand=False
+    ))
+
+    # Saisie multi-ligne avec prompt_toolkit
+    console.print("[bold cyan]\nQUESTION :[/bold cyan]")
+    text = prompt(HTML('<prompt><b> > </b></prompt>'), multiline=True, style=style)
+    return text.strip()
+
+
 # --- Fonction Principale ---
 
 def run():
-    print("=== ASSISTANT IA (Fichiers + Mémoire + YAML) ===")
+    # 1. Nettoyage initial pour un affichage propre
+    console.clear()
 
-    main_prompt = input("\nVotre question : ").strip()
+    main_prompt = get_user_input()
+
     if not main_prompt:
-        print("Erreur : Question obligatoire.")
+        console.print("[bold red]Erreur : Question obligatoire.[/bold red]")
         return
 
+    # 2. Affichage du panneau d'instruction pour la phase de fichiers
+    instruction_panel = Panel(
+        Group(
+            "[white]Saisissez les chemins des fichiers à inclure dans le contexte.[/white]",
+            "[dim]• TAB pour auto-compléter[/dim]",
+            "[dim]• ENTRÉE à vide pour valider et envoyer la requête[/dim]"
+        ),
+        title="[bold cyan]AJOUT DE FICHIERS[/bold cyan]",
+        title_align="left",
+        border_style="cyan",
+        padding=(1, 2),
+        expand=False
+    )
+    console.print(instruction_panel)
+
     context_blocks = []
+
+    # Préparation du compléteur de fichiers
+    file_completer = PathCompleter()
+
     while True:
-        f_input = input("\nFichier (TAB / Entrée pour terminer) : ").strip()
+        # Saisie du fichier avec auto-complétion intelligente
+        f_input = prompt(
+            HTML("<ansicyan><b>Fichier</b></ansicyan> <ansigray>(ou Entrée pour terminer) :</ansigray> "),
+            completer=file_completer
+        ).strip()
+
         if not f_input:
             break
 
@@ -117,11 +132,11 @@ def run():
             if found:
                 f_path = found
             else:
-                print(f"  [!] Fichier non trouvé.")
+                console.print(f"[bold red]  [!] Fichier non trouvé.[/bold red]")
                 continue
 
         if os.path.isdir(f_path):
-            print(f"  [!] C'est un dossier. Choisissez un fichier.")
+            console.print(f"[bold red]  [!] C'est un dossier. Choisissez un fichier.[/bold red]")
             continue
 
         try:
@@ -130,57 +145,60 @@ def run():
 
             file_parts = []
             while True:
-                r_input = input(
-                    f"  Plage pour '{os.path.basename(f_path)}' (ex: 10-50 / Entrée pour tout prendre) : ").strip()
+                r_input = prompt(
+                    f"  Plage pour '{os.path.basename(f_path)}' (ex: 10-50 / Entrée pour tout) : ").strip()
+
                 if not r_input:
                     if not file_parts:
                         context_blocks.append(f"--- FICHIER COMPLET : {f_path} ---\n" + "".join(lines))
-                        print(f"  [+] Fichier complet ajouté.")
+                        console.print(f"[green]  [+] Fichier complet ajouté.[/green]")
                     break
 
                 part = extract_single_range(lines, r_input, f_path)
                 file_parts.append(part)
-                print(f"  [+] Plage {r_input} ajoutée.")
+                console.print(f"[green]  [+] Plage {r_input} ajoutée.[/green]")
 
             if file_parts:
                 context_blocks.append("\n\n[...]\n\n".join(file_parts))
 
         except Exception as e:
-            print(f"  [!] Erreur : {e}")
+            console.print(f"[bold red]  [!] Erreur de lecture : {e}[/bold red]")
 
-    # --- Récupération du repo_map d'Aider ---
-    repo_map = get_repo_map()
+    # --- Récupération des contextes (RepoMap + YAML + Vectoriel) ---
+    with console.status("[bold blue]Consultation de la mémoire et du projet...[/bold blue]", spinner="dots"):
 
-    # --- Récupération Mémoires ---
-    summary_content = "Aucun résumé disponible."
-    if os.path.exists("resume_contexte.yaml"):
-        with open("resume_contexte.yaml", "r", encoding='utf-8') as f:
-            summary_content = f.read()
+        # --- Récupération du repo_map d'Aider ---
+        repo_map = get_repo_map()
 
-    print("\n🔍 Consultation de la mémoire à long terme...")
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
+        # --- Récupération Mémoires ---
+        summary_content = "Aucun résumé disponible."
+        if os.path.exists("resume_contexte.yaml"):
+            with open("resume_contexte.yaml", "r", encoding='utf-8') as f:
+                summary_content = f.read()
 
-        res = client.models.embed_content(
-            model="models/gemini-embedding-001",
-            contents=main_prompt,
-            config={'output_dimensionality': 768}
-        )
-        embedding = res.embeddings[0].values
+        console.print("[bold cyan]\n🔍 Consultation de la mémoire à long terme...[/bold cyan]")
+        try:
+            api_key = os.environ.get("GEMINI_API_KEY")
+            client = genai.Client(api_key=api_key)
 
-        conn = psycopg2.connect(**DB_CONFIG)
-        register_vector(conn)
-        cur = conn.cursor()
+            res = client.models.embed_content(
+                model="models/gemini-embedding-001",
+                contents=main_prompt,
+                config={'output_dimensionality': 768}
+            )
+            embedding = res.embeddings[0].values
 
-        # On récupère les 3 meilleurs souvenirs
-        cur.execute("SELECT content FROM chat_history ORDER BY embedding <=> %s::vector LIMIT 3", (embedding,))
-        rows = cur.fetchall()
-        context_vectoriel = "\n".join([f"--- Souvenir {i + 1} ---\n{r[0]}" for i, r in enumerate(rows)])
-        cur.close()
-        conn.close()
-    except Exception as e:
-        context_vectoriel = f"Erreur mémoire : {e}"
+            conn = psycopg2.connect(**DB_CONFIG)
+            register_vector(conn)
+            cur = conn.cursor()
+
+            cur.execute("SELECT content FROM chat_history ORDER BY embedding <=> %s::vector LIMIT 3", (embedding,))
+            rows = cur.fetchall()
+            context_vectoriel = "\n".join([f"--- Souvenir {i + 1} ---\n{r[0]}" for i, r in enumerate(rows)])
+            cur.close()
+            conn.close()
+        except Exception as e:
+            context_vectoriel = f"Erreur mémoire : {e}"
 
     # --- Construction du Prompt Final ---
     files_context_string = "\n\n".join(context_blocks)
@@ -191,7 +209,7 @@ def run():
 
 [CONTEXTE_STRUCTUREL_YAML]
 {summary_content}
-[/CONTEXTE_STRUCTUREL_YAML
+[/CONTEXTE_STRUCTUREL_YAML]
 
 [CONTEXTE_FICHIERS]
 {files_context_string}
@@ -203,25 +221,17 @@ def run():
 
 QUESTION_UTILISATEUR : {main_prompt}"""
 
-    # --- Envoi STDIN ---
-    print("\n🚀 Envoi au modèle...")
-    stop_spinner = threading.Event()
-    spinner_thread = threading.Thread(target=spinner_task, args=(stop_spinner,))
-
     try:
-        spinner_thread.start()
-        # On passe full_prompt via stdin au script glog.py
         subprocess.run(
             [PYTHON_BIN, GLOG_PATH, main_prompt],
             input=full_prompt,
             text=True,
             encoding='utf-8'
         )
-        stop_spinner.set()
-        spinner_thread.join()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrompu par l'utilisateur.[/yellow]")
     except Exception as e:
-        stop_spinner.set()
-        print(f"\nErreur : {e}")
+        console.print(f"\n[bold red]Erreur lors de l'appel de glog : {e}[/bold red]")
 
 
 if __name__ == "__main__":

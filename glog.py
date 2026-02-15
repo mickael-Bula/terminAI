@@ -10,9 +10,17 @@ from pgvector.psycopg2 import register_vector
 from google import genai
 from openai import OpenAI
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.rule import Rule
+
 
 # --- INITIALISATION ---
 load_dotenv()
+
+# On utilise stderr pour que les logs ne soient pas capturés dans la réponse finale
+console = Console(stderr=True)
 
 # Configuration DB
 DB_CONFIG = {
@@ -58,9 +66,9 @@ def index_interaction(full_text):
                     "INSERT INTO chat_history (content, content_hash, embedding) VALUES (%s, %s, %s)",
                     (full_text, content_hash, res.embeddings[0].values)
                 )
-        print("✅ Mémoire vectorielle synchronisée.")
+        console.print("[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée.[/bold cyan]")
     except Exception as e:
-        print(f"⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})", file=sys.stderr)
+        console.print(f"[bold red]⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})[/bold red]")
 
 
 def update_global_summary(user_query, ai_response):
@@ -76,7 +84,7 @@ def update_global_summary(user_query, ai_response):
     # Pile de modèles pour la consolidation
     archive_models = [
         "google/gemini-2.0-flash-001",
-        "google/gemini-2.0-flash-lite-001",
+        "google/gemini-2.0-pro-exp-02-05:free",
         "qwen/qwen-2.5-72b-instruct:free",
         "openrouter/auto"
     ]
@@ -141,12 +149,12 @@ IA : {ai_response[:2000]}
 
             with open(summary_file, 'w', encoding='utf-8') as f:
                 f.write(clean_yaml)
-            print("📊 Mémoire normative (YAML) consolidée.")
+            console.print("[bold green]✔[/bold green] [bold cyan]Mémoire normative (YAML) consolidée.[/bold cyan]")
             return
         except Exception as e:
             # Plus de transparence sur l'échec de consolidation
             err_msg = str(e)
-            print(f"⚠️ Échec consolidation avec {model} : {err_msg[:60]}...", file=sys.stderr)
+            console.print(f"[bold red]⚠️ Échec consolidation avec {model} : {err_msg[:60]}[/bold red]...")
             continue
 
 
@@ -158,10 +166,12 @@ def run():
     context_data = sys.stdin.read() if not sys.stdin.isatty() else ""
 
     if not user_question and not context_data:
-        print("❌ Erreur : Aucun contenu fourni.")
+        console.print("[bold red]❌ Erreur :[/bold red] Aucun contenu fourni.[/bold red")
         return
 
-    # 2. Exécution de ask.py
+    # 2. Exécution d'ask.py avec un indicateur visuel global
+    console.print(Rule("[bold green]Requête IA[/bold green]"))
+
     try:
         result = subprocess.run(
             [PYTHON_BIN, ASK_SCRIPT, user_question],
@@ -173,7 +183,7 @@ def run():
         )
 
         if result.returncode != 0:
-            print(f"\n[ABORT] L'IA a rencontré une erreur fatale.", file=sys.stderr)
+            console.print("\n[bold red]🛑 L'IA a rencontré une erreur fatale.[/bold red]")
             return
 
         ai_response = result.stdout.strip()
@@ -181,7 +191,15 @@ def run():
             print("⚠️ Réponse vide reçue de l'IA.")
             return
 
-        # 3. Écriture des fichiers de sortie
+        # 3. Rendu de la réponse en Markdown dans un Panel
+        console.print("\n")
+        render_md = Markdown(ai_response)
+        console.print(
+            Panel(render_md, title="[bold green]Analyse du Modèle[/bold green]", border_style="green", expand=False))
+
+        # 4. Écriture des fichiers de sortie
+        console.print(Rule("[bold green]Post-traitement[/bold green]"))
+
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         header = f"\n{'=' * 50}\nDATE   : {timestamp}\nPROMPT : {user_question}\n{'-' * 50}\n"
         full_entry = f"{header}{ai_response}\n"
@@ -193,18 +211,17 @@ def run():
             with open('historique_global.md', 'a', encoding='utf-8') as h:
                 h.write(full_entry)
         except OSError as e:
-            print(f"❌ Erreur disque : {e}", file=sys.stderr)
+            console.print(f"[bold red]❌ Erreur disque : {e}[/bold red]")
             return
 
-        # 4. Affichage final et tâches de fond
-        print(ai_response)
-
-        # Lancement des indexations et résumés
+        # 5. Lancement des indexations et résumés
         index_interaction(full_entry)
         update_global_summary(user_question, ai_response)
 
+        console.print("[bold green]✔[/bold green] [bold cyan]Workflow terminé avec succès.[/bold cyan]")
+
     except Exception as e:
-        print(f"❌ Erreur système : {e}", file=sys.stderr)
+        console.print(f"[bold red]❌ Erreur système :[/bold red] {e}")
 
 
 if __name__ == "__main__":

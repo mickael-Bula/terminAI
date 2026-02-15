@@ -549,3 +549,55 @@ for model_name in models:
         raise e
 ```
 
+## Déclarer les variables d'environnement dans Cmder
+
+Pour faciliter les appels depuis le terminal Cmder, 
+on déclare des chemins dans `C:\laragon\bin\cmder\config\user_profile.cmd` :
+
+```cmd
+:: Ajout du dossier des scripts Gemini au PATH
+set "PATH=C:\Users\bulam\.local\bin;%PATH%"
+
+:: Déclare l'encodage UTF-8 pour les scripts Python
+set PYTHONIOENCODING=utf-8
+
+:: Chemins vers les exécutables et scripts
+set LOCAL_BIN=C:\Users\bulam\.local\bin
+set PYTHON_BIN=C:\laragon\bin\python\python-3.10\python.exe
+set ASK_SCRIPT=C:\Users\bulam\.local\bin\ask.py
+set AIDER_CONF=C:\Users\bulam\.local\bin\.aider.conf.yml
+```
+
+Dans le fichier `C:\laragon\bin\cmder\config\user_aliases.cmd`,
+on déclare les alias :
+
+```cmd
+;= rem nouvel alias permettant d'enregistrer la réponse de Gemini dans un fichier et d'ajouter cette même réponse à un historique
+glog=%PYTHON_BIN% %LOCAL_BIN%\glog.py $*
+
+;= rem alias pour demander à Aider d'appliquer les modifications contenues dans le fichier dernier_plan.md (usage : ago src/Controller/HomeController.php templates/home/index.html.twig)
+ago=aider --config %AIDER_CONF% --message-file dernier_plan.md $*
+
+;= rem alias interrogeant Gemini de manière interractive
+glogi=%PYTHON_BIN% %LOCAL_BIN%\glog_interactive.py
+
+;= rem alias qui interroge l'IA en lui fournissant un contexte ciblé
+geni=%PYTHON_BIN% %LOCAL_BIN%\geni.py
+```
+
+## Ajout d'une interface à l'outil **geni**
+
+Pour rendre la saisie plus conviviable et efficace en permattant le copier-coller de bout de code,
+on installe les librairies Python **prompt_toolkit** et **rich** :
+
+```bash
+c:\laragon\bin\python\python-3.10\python.exe -m pip install rich
+```
+
+La libriairie **prompt_toolkit** permet de faire de la saisie multi-ligne, 
+avec retour à la ligne (ENTER), la validation de la saisie se faisant avec la combinaison de touches **ALT + ENTER**.
+
+La librairie **rich** permet de gérer l'affichage em markdonw, d'ajouter des spinners, barre de progression, panneaux,
+coloration et plus encore.
+
+

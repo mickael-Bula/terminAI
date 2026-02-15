@@ -2,10 +2,9 @@ import os
 import sys
 import re
 import time
-import threading
-import itertools
 from openai import OpenAI
 from dotenv import load_dotenv
+from rich.console import Console
 
 # --- Configuration de l'environnement ---
 load_dotenv()
@@ -15,23 +14,8 @@ site_packages = r"c:\laragon\bin\python\python-3.10\lib\site-packages"
 if site_packages not in sys.path:
     sys.path.append(site_packages)
 
-
-# --- Logique du Spinner ---
-
-def spinner_animation(stop_event, model_name):
-    """Anime un spinner sur stderr sans polluer stdout."""
-    chars = itertools.cycle(['|', '/', '-', '\\'])
-    for char in chars:
-        if stop_event.is_set():
-            break
-        # On écrit sur la même ligne (\r). L'espace à la fin permet d'effacer les restes de noms de modèles plus longs.
-        sys.stderr.write(f"\r⏳ [{char}] Réflexion avec {model_name}...")
-        sys.stderr.flush()
-        time.sleep(0.1)
-
-    # Nettoyage final de la ligne avant de rendre la main
-    sys.stderr.write("\r" + " " * 80 + "\r")
-    sys.stderr.flush()
+# On utilise stderr pour que les logs ne soient pas capturés dans la réponse finale
+console = Console(stderr=True)
 
 
 # --- Cœur du système de questionnement ---
@@ -42,59 +26,53 @@ def ask_question(user_prompt):
         api_key=os.getenv("OPENROUTER_API_KEY")
     )
 
-    # Pile de modèles (Failover)
+    # Votre pile de modèles (Failover)
     models = [
-        "deepseek/deepseek-r1",
-        "google/gemini-2.0-pro-exp-02-05:free",
+        "deepseek/deepseek-r1:freedom",  # Pour tester l'échec 402/404 # TODO : à supprimer après test validé
         "google/gemini-2.0-flash-001",
+        "google/gemini-2.0-pro-exp-02-05:free",
         "meta-llama/llama-3.3-70b-instruct:free",
         "openrouter/auto"
     ]
 
-    for model_name in models:
-        stop_spinner = threading.Event()
-        spinner_thread = threading.Thread(target=spinner_animation, args=(stop_spinner, model_name))
+    with console.status("[bold blue]Initialisation de la requête...[/bold blue]", spinner="dots") as status:
+        for model_name in models:
+            # On met à jour le texte du spinner sans détruire l'objet
+            status.update(f"[bold blue]Réflexion avec {model_name}.../[bold blue]")
 
-        try:
-            spinner_thread.start()
+            try:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    temperature=0.7
+                )
 
-            # Appel API
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": user_prompt}],
-                temperature=0.7
-            )
+                raw_content = response.choices[0].message.content
+                clean_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
 
-            # --- Succès ---
-            stop_spinner.set()
-            spinner_thread.join()
+                # Succès ! On stocke le nom du gagnant
+                winner = model_name
+                break  # On casse la boucle for
 
-            raw_content = response.choices[0].message.content
-            # Filtrage du bloc de réflexion DeepSeek
-            clean_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+            except Exception as e:
+                error_msg = str(e)
+                # On utilise console.print (qui va forcer le spinner à se suspendre un instant)
+                console.print(f"[bold red]⚠️  ÉCHEC : {model_name}[/bold red]")
 
-            print(f"✅ Réponse générée par : {model_name}", file=sys.stderr)
-            return clean_content
+                passable_errors = ["429", "404", "402", "NOT_FOUND", "500", "503", "CREDITS", "BALANCE"]
+                if any(err in error_msg.upper() for err in passable_errors):
+                    console.print(f"[bold red]   CAUSE : {error_msg[:80]}...[/bold red]")
+                    console.print(f"[cyan]🔄 Passage au modèle suivant...[/cyan]")
+                    time.sleep(0.3)
+                    continue
 
-        except Exception as e:
-            # --- Erreur rencontrée ---
-            stop_spinner.set()
-            spinner_thread.join()  # On attend que le spinner s'arrête proprement
+                raise e
+        else:
+            # Si la boucle finit sans break
+            return None
 
-            error_msg = str(e)
-            passable_errors = ["429", "404", "402", "NOT_FOUND", "500", "503", "CREDITS", "BALANCE"]
-
-            # Si l'erreur est dans notre liste de secours
-            if any(err in error_msg.upper() for err in passable_errors):
-                print(f"⚠️  MODÈLE KO : {model_name}", file=sys.stderr)
-                print(f"   CAUSE : {error_msg[:80]}...", file=sys.stderr)
-                print(f"🔄 Passage au modèle suivant...\n", file=sys.stderr)
-                time.sleep(0.3)  # Petit délai pour laisser le temps de lire l'erreur
-                continue
-
-            # Si l'erreur est vraiment critique (ex: Clé API invalide)
-            print(f"❌ Erreur critique avec {model_name}: {e}", file=sys.stderr)
-            raise e
+    console.print(f"[bold green]✅ Réponse générée par : {winner}[/bold green]")
+    return clean_content
 
 
 # --- Gestion des entrées et du workflow ---
@@ -113,23 +91,26 @@ def ask():
 
     # Assemblage final
     parts = []
-    if system_content: parts.append(f"### SYSTEM INSTRUCTIONS ###\n{system_content}")
-    if pipe_content:   parts.append(f"### CONTEXT ###\n{pipe_content}")
-    if user_query:     parts.append(f"### USER QUERY ###\n{user_query}")
+    if system_content:
+        parts.append(f"### SYSTEM INSTRUCTIONS ###\n{system_content}")
+    if pipe_content:
+        parts.append(f"### CONTEXT ###\n{pipe_content}")
+    if user_query:
+        parts.append(f"### USER QUERY ###\n{user_query}")
 
     prompt_final = "\n\n---\n\n".join(parts)
 
     if not prompt_final.strip():
-        print("Usage: glog 'votre question' ou cat file | glog", file=sys.stderr)
+        console.print("Usage: glog 'votre question' ou cat file | glog")
         return
 
     try:
         response = ask_question(prompt_final)
-        # On envoie uniquement la réponse IA sur stdout pour capture par glog.py
+        # On utilise le print() natif, glog se chargeant d'ajouter les styles.
         if response:
             print(response)
     except Exception as e:
-        print(f"Erreur fatale : {e}", file=sys.stderr)
+        console.print(f"Erreur fatale : {e}")
         sys.exit(1)
 
 
