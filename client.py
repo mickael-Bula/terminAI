@@ -9,7 +9,7 @@ load_dotenv()
 
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 SECRET_TOKEN = os.getenv("SECRET_TOKEN")
-URL = "https://openrouter.webtrader.fr/relay"
+URL = os.getenv("RELAY_URL")
 
 cipher = Fernet(ENCRYPTION_KEY)
 

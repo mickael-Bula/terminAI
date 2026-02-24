@@ -8,16 +8,22 @@ import time
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from google import genai
-from openai import OpenAI
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.rule import Rule
+from cryptography.fernet import Fernet
+import requests
+import json
 
 
 # --- INITIALISATION ---
 load_dotenv()
+
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY").encode()
+SECRET_TOKEN = os.getenv("SECRET_TOKEN")
+RELAY_URL = os.getenv("RELAY_URL")
 
 # On utilise stderr pour que les logs ne soient pas capturés dans la réponse finale
 console = Console(stderr=True)
@@ -33,7 +39,7 @@ DB_CONFIG = {
 
 # Configuration Chemins
 LOCAL_BIN = os.environ.get('LOCAL_BIN', os.path.expanduser(r'~\.local\bin'))
-ASK_SCRIPT = os.path.join(LOCAL_BIN, 'ask.py')
+ASK_SCRIPT = os.path.join(LOCAL_BIN, 'call_relay.py')
 PYTHON_BIN = os.environ.get('PYTHON_BIN', 'python')
 
 
@@ -57,17 +63,26 @@ def index_interaction(full_text):
                 if cur.fetchone(): return
 
                 # Génération Embedding
-                res = client.models.embed_content(
-                    model="models/gemini-embedding-001",
-                    contents=full_text,
-                    config={'output_dimensionality': 768}
-                )
+                try:
+                    res = client.models.embed_content(
+                        model="models/gemini-embedding-001",
+                        contents=full_text,
+                        config={'output_dimensionality': 768}
+                    )
 
-                cur.execute(
-                    "INSERT INTO chat_history (content, content_hash, embedding) VALUES (%s, %s, %s)",
-                    (full_text, content_hash, res.embeddings[0].values)
-                )
-        console.print("[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée.[/bold cyan]")
+                    cur.execute(
+                        "INSERT INTO chat_history (content, content_hash, embedding) VALUES (%s, %s, %s)",
+                        (full_text, content_hash, res.embeddings[0].values)
+                    )
+                    console.print("[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée.[/bold cyan]")
+                except MemoryError as e:
+                    console.print(f"[bold red]⚠️ Mémoire insuffisante pour l'embedding : {e}[/bold red]")
+                    return
+                except Exception as e:
+                    console.print(f"[bold red]⚠️ Erreur lors de la génération de l'embedding : {e}[/bold red]")
+                    return
+
+        
     except Exception as e:
         console.print(f"[bold red]⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})[/bold red]")
 
@@ -77,11 +92,6 @@ def update_global_summary(user_query, ai_response):
     # Petite pause pour éviter le Rate Limit (429) juste après la réponse principale
     time.sleep(1)
 
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY")
-    )
-
     # Pile de modèles pour la consolidation
     archive_models = [
         "google/gemini-2.0-flash-001",
@@ -89,6 +99,8 @@ def update_global_summary(user_query, ai_response):
         "qwen/qwen-2.5-72b-instruct:free",
         "openrouter/auto"
     ]
+
+    cipher = Fernet(ENCRYPTION_KEY)
 
     summary_file = 'resume_contexte.yaml'
 
@@ -139,19 +151,31 @@ IA : {ai_response[:2000]}
 
     for model in archive_models:
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": "Tu es un archiviste YAML."},
-                          {"role": "user", "content": prompt_consolidation}],
-                temperature=0.1
-            )
-            raw = response.choices[0].message.content
-            clean_yaml = re.sub(r'```yaml|```', '', raw).strip()
+            # Construction du payload pour le relais
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Tu es un archiviste YAML."},
+                    {"role": "user", "content": prompt_consolidation}
+                ],
+                "temperature": 0.1
+            }
 
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(clean_yaml)
-            console.print("[bold green]✔[/bold green] [bold cyan]Mémoire normative (YAML) consolidée.[/bold cyan]")
-            return
+            data_to_send = {"internal_token": SECRET_TOKEN, "payload": payload}
+            encrypted_data = cipher.encrypt(json.dumps(data_to_send).encode())
+
+            # Appel via relais
+            response = requests.post(RELAY_URL, data=encrypted_data)
+
+            if response.status_code == 200:
+                raw = response.json()['choices'][0]['message']['content']
+                clean_yaml = re.sub(r'```yaml|```', '', raw).strip()
+
+                with open(summary_file, 'w', encoding='utf-8') as f:
+                    f.write(clean_yaml)
+                console.print(
+                    "[bold green]✔[/bold green] [bold cyan]Mémoire normative consolidée (via Relais).[/bold cyan]")
+                return
         except Exception as e:
             # Plus de transparence sur l'échec de consolidation
             err_msg = str(e)
@@ -184,7 +208,9 @@ def run():
         )
 
         if result.returncode != 0:
-            console.print("\n[bold red]🛑 L'IA a rencontré une erreur fatale.[/bold red]")
+            console.print(f"\n[bold red]🛑 Erreur fatale (Code {result.returncode})[/bold red]")
+            console.print(f"DEBUG STDOUT: {result.stdout}")
+            console.print(f"DEBUG STDERR: {result.stderr}")
             return
 
         ai_response = result.stdout.strip()

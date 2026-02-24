@@ -21,7 +21,7 @@ console = Console(stderr=True)
 
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY").encode()
 SECRET_TOKEN = os.getenv("SECRET_TOKEN")
-RELAY_URL = "https://openrouter.webtrader.fr/relay"
+RELAY_URL = os.getenv("RELAY_URL")
 
 
 def ask_question(user_prompt):
@@ -53,7 +53,7 @@ def ask_question(user_prompt):
                 # Chiffrement
                 encrypted_data = cipher.encrypt(json.dumps(data_to_send).encode())
 
-                # Requête vers ton relais
+                # Requête vers le relais
                 response = requests.post(RELAY_URL, data=encrypted_data)
 
                 if response.status_code != 200:
@@ -73,3 +73,21 @@ def ask_question(user_prompt):
                 continue
 
         return None
+
+
+def main():
+    # Récupération du prompt depuis les arguments
+    user_query = " ".join(sys.argv[1:])
+
+    # Appel de ta fonction existante
+    response = ask_question(user_query)
+
+    # On affiche le résultat dans le terminal
+    if response:
+        print(response)
+    else:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

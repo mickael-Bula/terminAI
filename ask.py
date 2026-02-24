@@ -3,6 +3,7 @@ import sys
 import re
 import time
 from openai import OpenAI
+from openai.types.chat import ChatCompletionUserMessageParam
 from dotenv import load_dotenv
 from rich.console import Console
 
@@ -28,7 +29,7 @@ def ask_question(user_prompt):
 
     # Votre pile de modèles (Failover)
     models = [
-        "deepseek/deepseek-r1:freedom",  # Pour tester l'échec 402/404 # TODO : à supprimer après test validé
+        # "deepseek/deepseek-r1:freedom",  # Pour tester l'échec 402/404
         "google/gemini-2.0-flash-001",
         "google/gemini-2.0-pro-exp-02-05:free",
         "meta-llama/llama-3.3-70b-instruct:free",
@@ -43,7 +44,7 @@ def ask_question(user_prompt):
             try:
                 response = client.chat.completions.create(
                     model=model_name,
-                    messages=[{"role": "user", "content": user_prompt}],
+                    messages=[ChatCompletionUserMessageParam(role="user", content=user_prompt)],
                     temperature=0.7
                 )
 

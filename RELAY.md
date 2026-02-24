@@ -180,6 +180,23 @@ def send_to_relay(payload):
     return response.json()
 ```
 
+## Exécution de geni en passant par le relais
+
+Le script ask.py a été modifié en call_relay après y avoir modifié les appels directs à l'IA.
+Ce script doit être présent dans le dossier appelé par la chaîne ASK_SCRIPT = os.path.join(LOCAL_BIN, 'call_relay.py').
+
+De même, pour être appelé par geni, le script glog.py doit aussi être présent dans le dossier des binaires.
+Ce script a en outre été modifié pour appeler le relais et utiliser l'IA pour générer les appels à la base vectorielle.
+Ce script modifié a été nommé glog_relay.py.
+
+Le script geni a également été modifié pour y ajouter une méthode appelant l'embedding en passant par le relais.
+Le script modifié se nomme geni_relay.py.
+
+## TODO
+
+Il reste à gérer les appels à Aider via l'alias **ago**, notamment les erreurs de modèle.
+Il faut également qu'Aider passe par le relais lui aussi.
+
 ## Troubleshooting
 
 L'interface pour créer les tunnels Cloudflare est accessible depuis https://one.dash.cloudflare.com/
