@@ -28,7 +28,9 @@ SECRET_TOKEN = os.getenv("SECRET_TOKEN")
 RELAY_URL = os.getenv("RELAY_URL")
 
 # --- Configuration et Chemins ---
-GLOG_PATH = os.path.expanduser("~/.local/bin/glog.py")
+LOCAL_BIN = os.getenv("LOCAL_BIN")
+GLOG_PATH = os.path.expanduser(f"{LOCAL_BIN}/glog_relay.py")
+PYTHON_BIN = sys.executable
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT"),
@@ -36,7 +38,6 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD")
 }
-PYTHON_BIN = sys.executable
 
 
 # --- Fonctions Utilitaires ---
@@ -106,6 +107,7 @@ def get_remote_embedding(text):
 
     # Appel vers l'endpoint /embed sur le relais
     try:
+        # Supprime /relay de l'URL pour y ajouter /embed
         response = requests.post(f"{RELAY_URL.rsplit('/', 1)[0]}/embed", data=encrypted_data)
 
         if response.status_code == 200:

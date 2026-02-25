@@ -22,6 +22,7 @@ console = Console(stderr=True)
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY").encode()
 SECRET_TOKEN = os.getenv("SECRET_TOKEN")
 RELAY_URL = os.getenv("RELAY_URL")
+LOCAL_BIN = os.getenv("LOCAL_BIN")
 
 
 def ask_question(user_prompt):
@@ -75,19 +76,44 @@ def ask_question(user_prompt):
         return None
 
 
-def main():
-    # Récupération du prompt depuis les arguments
-    user_query = " ".join(sys.argv[1:])
+# --- Gestion des entrées et du workflow ---
 
-    # Appel de ta fonction existante
-    response = ask_question(user_query)
+def ask():
+    # Lecture du prompt système (si présent)
+    system_prompt_path = fr"{LOCAL_BIN}\prompt_system.txt"
+    system_content = ""
+    if os.path.exists(system_prompt_path):
+        with open(system_prompt_path, 'r', encoding='utf-8') as f:
+            system_content = f.read().strip()
 
-    # On affiche le résultat dans le terminal
-    if response:
-        print(response)
-    else:
+    # Capture du flux (Pipe) ou des arguments
+    pipe_content = sys.stdin.read().strip() if not sys.stdin.isatty() else ""
+    user_query = " ".join(sys.argv[1:]).strip()
+
+    # Assemblage final
+    parts = []
+    if system_content:
+        parts.append(f"### SYSTEM INSTRUCTIONS ###\n{system_content}")
+    if pipe_content:
+        parts.append(f"### CONTEXT ###\n{pipe_content}")
+    if user_query:
+        parts.append(f"### USER QUERY ###\n{user_query}")
+
+    prompt_final = "\n\n---\n\n".join(parts)
+
+    if not prompt_final.strip():
+        console.print("Usage: glog 'votre question' ou cat file | glog")
+        return
+
+    try:
+        response = ask_question(prompt_final)
+        # On utilise le print() natif, glog se chargeant d'ajouter les styles.
+        if response:
+            print(response)
+    except Exception as e:
+        console.print(f"Erreur fatale : {e}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    ask()

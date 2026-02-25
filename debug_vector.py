@@ -4,6 +4,7 @@ import hashlib
 from pgvector.psycopg2 import register_vector
 from google import genai
 from dotenv import load_dotenv
+from google.genai import types
 
 load_dotenv()
 
@@ -38,7 +39,9 @@ def run_debug():
         res = client.models.embed_content(
             model="models/gemini-embedding-001",
             contents=test_text,
-            config={'output_dimensionality': 768}
+            config=types.EmbedContentConfig(
+                output_dimensionality=768
+            )
         )
         embedding = res.embeddings[0].values
         dim_found = len(embedding)

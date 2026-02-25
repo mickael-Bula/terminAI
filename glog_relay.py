@@ -6,6 +6,7 @@ import hashlib
 import re
 import time
 import psycopg2
+from google.genai import types
 from pgvector.psycopg2 import register_vector
 from google import genai
 from dotenv import load_dotenv
@@ -16,7 +17,6 @@ from rich.rule import Rule
 from cryptography.fernet import Fernet
 import requests
 import json
-
 
 # --- INITIALISATION ---
 load_dotenv()
@@ -67,7 +67,9 @@ def index_interaction(full_text):
                     res = client.models.embed_content(
                         model="models/gemini-embedding-001",
                         contents=full_text,
-                        config={'output_dimensionality': 768}
+                        config=types.EmbedContentConfig(
+                            output_dimensionality=768
+                        )
                     )
 
                     cur.execute(
@@ -82,7 +84,6 @@ def index_interaction(full_text):
                     console.print(f"[bold red]⚠️ Erreur lors de la génération de l'embedding : {e}[/bold red]")
                     return
 
-        
     except Exception as e:
         console.print(f"[bold red]⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})[/bold red]")
 
