@@ -208,3 +208,10 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bulam;
 -- (Optionnel, mais recommandé) Donne les droits par défaut pour le futur
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bulam;
 ```
+
+### Connexion psql avec user dédié
+
+Pour se connecter à la base vectorielle avec l'utilisateur dédié :
+
+1. Entrer dans le cotainer postgres depuis Proxmox : `$ pct enter 102`
+2. Se connecter à psql avec la chaîne suivante : `psql -h localhost -U mon_user -d ma_base`

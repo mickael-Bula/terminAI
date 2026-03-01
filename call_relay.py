@@ -25,7 +25,12 @@ RELAY_URL = os.getenv("RELAY_URL")
 LOCAL_BIN = os.getenv("LOCAL_BIN")
 
 
-def ask_question(user_prompt):
+def get_project_id():
+    """Récupère le nom du dossier courant pour isoler le contexte."""
+    return os.path.basename(os.getcwd())
+
+
+def ask_question(user_prompt, project_id):
     cipher = Fernet(ENCRYPTION_KEY)
 
     # Pile de modèles
@@ -35,14 +40,16 @@ def ask_question(user_prompt):
         "meta-llama/llama-3.3-70b-instruct:free"
     ]
 
-    with console.status("[bold blue]Initialisation via Relais...[/bold blue]", spinner="dots") as status:
+    with console.status("[bold blue]Initialisation via Relais [{project_id}]...[/bold blue]", spinner="dots") as status:
         for model_name in models:
             status.update(f"[bold blue]Réflexion avec {model_name}...[/bold blue]")
 
-            # Construire le payload comme attendu par relay.py
+            # Construire le payload comme attendu par relay.py. On ajoute project_id pour filtrer par projet.
             payload = {
                 "model": model_name,
-                "messages": [{"role": "user", "content": user_prompt}]
+                "messages": [{"role": "user", "content": user_prompt}],
+                "project_id": project_id,
+                "max_tokens": 4000
             }
 
             data_to_send = {
@@ -58,19 +65,26 @@ def ask_question(user_prompt):
                 response = requests.post(RELAY_URL, data=encrypted_data)
 
                 if response.status_code != 200:
-                    raise Exception(f"Erreur API Relais: {response.status_code} - {response.text}")
+                    console.print(f"[red]❌ Erreur Relais ({response.status_code})[/red]")
+                    continue
+
+                resp_json = response.json()
 
                 # Traitement de la réponse
-                resp_json = response.json()
-                raw_content = resp_json['choices'][0]['message']['content']
-                clean_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
-
-                return clean_content
+                if "choices" in resp_json:
+                    raw_content = resp_json['choices'][0]['message']['content']
+                    return re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+                elif "error" in resp_json:
+                    # On affiche l'erreur réelle d'OpenRouter (souvent le manque de crédits ou quota)
+                    err_msg = resp_json["error"].get("message", "Erreur inconnue")
+                    console.print(f"[yellow]⚠️  Modèle {model_name} indisponible : {err_msg[:100]}[/yellow]")
+                else:
+                    console.print(f"[red]❓ Format de réponse inconnu pour {model_name}[/red]")
 
             except Exception as e:
-                console.print(f"[bold red]⚠️  ÉCHEC : {model_name}[/bold red]")
-                console.print(f"[bold red]   CAUSE : {str(e)[:50]}[/bold red]")
-                time.sleep(0.3)
+                # Affichage propre de la cause
+                console.print(f"[bold red]⚠️  ÉCHEC : {model_name} | Erreur: {type(e).__name__}[/bold red]")
+                time.sleep(0.5)
                 continue
 
         return None
@@ -79,6 +93,9 @@ def ask_question(user_prompt):
 # --- Gestion des entrées et du workflow ---
 
 def ask():
+    # Détection du contexte projet
+    project_id = get_project_id()
+
     # Lecture du prompt système (si présent)
     system_prompt_path = fr"{LOCAL_BIN}\prompt_system.txt"
     system_content = ""
@@ -106,7 +123,7 @@ def ask():
         return
 
     try:
-        response = ask_question(prompt_final)
+        response = ask_question(prompt_final, project_id)
         # On utilise le print() natif, glog se chargeant d'ajouter les styles.
         if response:
             print(response)

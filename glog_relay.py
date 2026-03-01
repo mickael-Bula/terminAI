@@ -45,8 +45,13 @@ PYTHON_BIN = os.environ.get('PYTHON_BIN', 'python')
 
 # --- FONCTIONS DE SERVICE ---
 
-def index_interaction(full_text):
-    """Calcule le hash, l'embedding et insère dans Postgres."""
+def get_project_id():
+    """Identifie le projet par le nom du dossier courant."""
+    return os.path.basename(os.getcwd())
+
+
+def index_interaction(full_text, project_id):
+    """Calcule le hash, l'embedding et insère dans Postgres avec l'ID du projet."""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -73,10 +78,12 @@ def index_interaction(full_text):
                     )
 
                     cur.execute(
-                        "INSERT INTO chat_history (content, content_hash, embedding) VALUES (%s, %s, %s)",
-                        (full_text, content_hash, res.embeddings[0].values)
+                        "INSERT INTO chat_history (content, content_hash, embedding, project_id) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (full_text, content_hash, res.embeddings[0].values, project_id)
                     )
-                    console.print("[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée.[/bold cyan]")
+                    console.print("[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée "
+                                  "({project_id}).[/bold cyan]")
                 except MemoryError as e:
                     console.print(f"[bold red]⚠️ Mémoire insuffisante pour l'embedding : {e}[/bold red]")
                     return
@@ -88,7 +95,7 @@ def index_interaction(full_text):
         console.print(f"[bold red]⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})[/bold red]")
 
 
-def update_global_summary(user_query, ai_response):
+def update_global_summary(user_query, ai_response, project_id):
     """Consolide la mémoire normative YAML avec basculement intelligent."""
     # Petite pause pour éviter le Rate Limit (429) juste après la réponse principale
     time.sleep(1)
@@ -159,7 +166,9 @@ IA : {ai_response[:2000]}
                     {"role": "system", "content": "Tu es un archiviste YAML."},
                     {"role": "user", "content": prompt_consolidation}
                 ],
-                "temperature": 0.1
+                "temperature": 0.1,
+                "max_tokens": 2048,  # Limite suffisante pour un résumé
+                "project_id": project_id  # Injection dans le payload pour le relais
             }
 
             data_to_send = {"internal_token": SECRET_TOKEN, "payload": payload}
@@ -169,14 +178,18 @@ IA : {ai_response[:2000]}
             response = requests.post(RELAY_URL, data=encrypted_data)
 
             if response.status_code == 200:
-                raw = response.json()['choices'][0]['message']['content']
-                clean_yaml = re.sub(r'```yaml|```', '', raw).strip()
+                resp_json = response.json()
+                if 'choices' in resp_json:
+                    raw = resp_json['choices'][0]['message']['content']
+                    clean_yaml = re.sub(r'```yaml|```', '', raw).strip()
 
-                with open(summary_file, 'w', encoding='utf-8') as f:
-                    f.write(clean_yaml)
-                console.print(
-                    "[bold green]✔[/bold green] [bold cyan]Mémoire normative consolidée (via Relais).[/bold cyan]")
-                return
+                    with open(summary_file, 'w', encoding='utf-8') as f:
+                        f.write(clean_yaml)
+                    console.print(
+                        "[bold green]✔[/bold green] [bold cyan]Mémoire normative consolidée (via Relais).[/bold cyan]")
+                    return
+                else:
+                    raise KeyError("Clé 'choices' manquante dans la réponse du relais")
         except Exception as e:
             # Plus de transparence sur l'échec de consolidation
             err_msg = str(e)
@@ -187,7 +200,8 @@ IA : {ai_response[:2000]}
 # --- LOGIQUE PRINCIPALE ---
 
 def run():
-    # 1. Collecte des entrées (Arguments + Pipe)
+    # 1. Collecte des entrées (Arguments + Pipe) et détection du projet
+    project_id = get_project_id()
     user_question = " ".join(sys.argv[1:])
     context_data = sys.stdin.read() if not sys.stdin.isatty() else ""
 
@@ -243,10 +257,10 @@ def run():
             return
 
         # 5. Lancement des indexations et résumés
-        index_interaction(full_entry)
-        update_global_summary(user_question, ai_response)
+        index_interaction(full_entry, project_id)
+        update_global_summary(user_question, ai_response, project_id)
 
-        console.print("[bold green]✔[/bold green] [bold cyan]Workflow terminé avec succès.[/bold cyan]")
+        console.print("[bold green]✔[/bold green] [bold cyan]Workflow terminé avec succès [{project_id}].[/bold cyan]")
 
     except Exception as e:
         console.print(f"[bold red]❌ Erreur système :[/bold red] {e}")
