@@ -82,8 +82,8 @@ def index_interaction(full_text, project_id):
                         "VALUES (%s, %s, %s, %s)",
                         (full_text, content_hash, res.embeddings[0].values, project_id)
                     )
-                    console.print("[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée "
-                                  "({project_id}).[/bold cyan]")
+                    console.print(f"[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée "
+                                  f"({project_id}).[/bold cyan]")
                 except MemoryError as e:
                     console.print(f"[bold red]⚠️ Mémoire insuffisante pour l'embedding : {e}[/bold red]")
                     return
@@ -197,6 +197,48 @@ IA : {ai_response[:2000]}
             continue
 
 
+def apply_gemini_edits(ai_response):
+    """Parse et applique les blocs FILE/SEARCH/REPLACE/END de la réponse."""
+    pattern = r"FILE:\s*[`']?(.*?)`?\s*SEARCH:\s*(.*?)\s*REPLACE:\s*(.*?)\s*END"
+    matches = re.findall(pattern, ai_response, re.DOTALL)
+
+    if not matches:
+        return False
+
+    console.print(Rule("[bold yellow]Application des modifications[/bold yellow]"))
+
+    for file_path, search_text, replace_text in matches:
+        file_path = file_path.strip().replace('`', '').replace("'", "")
+
+        # Nettoyage des balises markdown
+        def clean(t):
+            t = t.strip()
+            t = re.sub(r'^```[a-z]*\n', '', t, flags=re.IGNORECASE)
+            return re.sub(r'\n```$', '', t).strip('`').strip()
+
+        search_text = clean(search_text)
+        replace_text = clean(replace_text)
+
+        # Gestion Création vs Modification
+        if "NEW_FILE" in search_text or not os.path.exists(file_path):
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(replace_text)
+            console.print(f"[bold green]🆕 Créé :[/bold green] {file_path}")
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            if search_text in content:
+                new_content = content.replace(search_text, replace_text)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                console.print(f"[bold green]✅ Modifié :[/bold green] {file_path}")
+            else:
+                console.print(f"[bold red]❌ Non trouvé :[/bold red] {file_path} (le bloc SEARCH ne correspond pas)")
+    return True
+
+
 # --- LOGIQUE PRINCIPALE ---
 
 def run():
@@ -206,7 +248,7 @@ def run():
     context_data = sys.stdin.read() if not sys.stdin.isatty() else ""
 
     if not user_question and not context_data:
-        console.print("[bold red]❌ Erreur :[/bold red] Aucun contenu fourni.[/bold red")
+        console.print("[bold red]❌ Erreur : Aucun contenu fourni.[/bold red")
         return
 
     # 2. Exécution d'ask.py avec un indicateur visuel global
@@ -255,6 +297,40 @@ def run():
         except OSError as e:
             console.print(f"[bold red]❌ Erreur disque : {e}[/bold red]")
             return
+
+        # 5. APPLICATION DU PLAN
+        if "SEARCH:" in ai_response and "REPLACE:" in ai_response:
+            console.print("\n")
+            confirm_panel = Panel(
+                "[bold yellow]L'IA a généré des instructions de modification de fichiers.[/bold yellow]\n"
+                "Voulez-vous appliquer ces changements chirurgicaux maintenant ?",
+                title="[bold red]🛠 ACTION REQUISE[/bold red]",
+                border_style="yellow",
+                padding=(1, 2)
+            )
+            console.print(confirm_panel)
+
+            # Gestion de l'input même si stdin est utilisé par un pipe
+            try:
+                # Sous Windows, on utilise 'CON' pour lire le terminal directement, '/dev/tty' sous Linux/Mac.
+                term_path = 'CON' if os.name == 'nt' else '/dev/tty'
+                with open(term_path, 'r') as f:
+                    console.print("👉 Appliquer ? (y/N) [default: n] : ", end="")
+                    choice = f.readline().strip().lower()
+            except (OSError, IOError):
+                # Fallback si l'ouverture du terminal échoue
+                try:
+                    choice = input("👉 Appliquer ? (y/N) [default: n] : ").strip().lower()
+                except EOFError:
+                    choice = 'n'
+
+            confirm = choice if choice else 'n'
+
+            if confirm == 'y':
+                apply_gemini_edits(ai_response)
+            else:
+                console.print(
+                    "[yellow]⏩ Application ignorée. Les modifications sont conservées dans 'dernier_plan.md'.[/yellow]")
 
         # 5. Lancement des indexations et résumés
         index_interaction(full_entry, project_id)
