@@ -3,8 +3,10 @@ import subprocess
 import sys
 import psycopg2
 from pgvector.psycopg2 import register_vector
-from google import genai
 from dotenv import load_dotenv
+import requests
+import json
+from cryptography.fernet import Fernet
 
 # --- Importations Saisie (prompt_toolkit) ---
 from prompt_toolkit import prompt
@@ -21,8 +23,14 @@ from rich.panel import Panel
 console = Console()
 load_dotenv()
 
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY").encode()
+SECRET_TOKEN = os.getenv("SECRET_TOKEN")
+RELAY_URL = os.getenv("RELAY_URL")
+
 # --- Configuration et Chemins ---
-GLOG_PATH = os.path.expanduser("~/.local/bin/glog.py")
+LOCAL_BIN = os.getenv("LOCAL_BIN")
+GLOG_PATH = os.path.expanduser(f"{LOCAL_BIN}/glog_relay.py")
+PYTHON_BIN = sys.executable
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT"),
@@ -30,7 +38,6 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD")
 }
-PYTHON_BIN = sys.executable
 
 
 # --- Fonctions Utilitaires ---
@@ -57,8 +64,10 @@ def get_repo_map():
     """Génère ou récupère la carte du projet via Aider."""
     try:
         result = subprocess.run(
-            ["aider", "--show-repo-map"],
-            capture_output=True, text=True, encoding='utf-8'
+            ["aider", "--show-repo-map", "--yes-always", "--no-show-model-warnings"],
+            capture_output=True,
+            text=True,
+            encoding='utf-8'
         )
         return result.stdout
     except subprocess.SubprocessError:
@@ -82,6 +91,35 @@ def get_user_input():
     console.print("[bold cyan]\nQUESTION :[/bold cyan]")
     text = prompt(HTML('<prompt><b> > </b></prompt>'), multiline=True, style=style)
     return text.strip()
+
+
+# Appel le relais pour piloter l'embedding
+def get_remote_embedding(text):
+    cipher = Fernet(ENCRYPTION_KEY)
+
+    # Payload pour le relais
+    data_to_send = {
+        "internal_token": SECRET_TOKEN,
+        "text": text
+    }
+
+    encrypted_data = cipher.encrypt(json.dumps(data_to_send).encode())
+
+    # Appel vers l'endpoint /embed sur le relais
+    try:
+        # Supprime /relay de l'URL pour y ajouter /embed
+        response = requests.post(f"{RELAY_URL.rsplit('/', 1)[0]}/embed", data=encrypted_data)
+
+        if response.status_code == 200:
+            return response.json()['embedding']
+        else:
+            raise Exception(f"Erreur lors de la génération de l'embedding distant: {response.status_code} - {response.text}")
+    except MemoryError as e:
+        console.print(f"[bold red]⚠️ Mémoire insuffisante lors de la requête d'embedding distant : {e}[/bold red]")
+        return None  # Ou une valeur par défaut, selon le cas
+    except Exception as e:
+        console.print(f"[bold red]⚠️ Erreur lors de la requête d'embedding distant : {e}[/bold red]")
+        return None
 
 
 # --- Fonction Principale ---
@@ -178,15 +216,7 @@ def run():
 
         console.print("[bold cyan]\n🔍 Consultation de la mémoire à long terme...[/bold cyan]")
         try:
-            api_key = os.environ.get("GEMINI_API_KEY")
-            client = genai.Client(api_key=api_key)
-
-            res = client.models.embed_content(
-                model="models/gemini-embedding-001",
-                contents=main_prompt,
-                config={'output_dimensionality': 768}
-            )
-            embedding = res.embeddings[0].values
+            embedding = get_remote_embedding(main_prompt)
 
             conn = psycopg2.connect(**DB_CONFIG)
             register_vector(conn)

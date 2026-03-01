@@ -53,6 +53,9 @@ def index_file(filepath):
                     (text, content_hash, embedding)
                 )
                 conn.commit()
+            except MemoryError as e:
+                print(f"❌ Mémoire insuffisante pour l'embedding : {e}")
+                conn.rollback()
             except Exception as e:
                 print(f"❌ Erreur sur ce bloc : {e}")
                 conn.rollback()
