@@ -17,6 +17,7 @@ from rich.rule import Rule
 from cryptography.fernet import Fernet
 import requests
 import json
+import argparse
 
 # --- INITIALISATION ---
 load_dotenv()
@@ -24,9 +25,6 @@ load_dotenv()
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY").encode()
 SECRET_TOKEN = os.getenv("SECRET_TOKEN")
 RELAY_URL = os.getenv("RELAY_URL")
-
-# On utilise stderr pour que les logs ne soient pas capturés dans la réponse finale
-console = Console(stderr=True)
 
 # Configuration DB
 DB_CONFIG = {
@@ -41,6 +39,9 @@ DB_CONFIG = {
 LOCAL_BIN = os.environ.get('LOCAL_BIN', os.path.expanduser(r'~\.local\bin'))
 ASK_SCRIPT = os.path.join(LOCAL_BIN, 'call_relay.py')
 PYTHON_BIN = os.environ.get('PYTHON_BIN', 'python')
+
+# 1. On crée l'objet console au niveau GLOBAL. Par défaut, il écrit sur stdout
+console = Console()
 
 
 # --- FONCTIONS DE SERVICE ---
@@ -65,7 +66,8 @@ def index_interaction(full_text, project_id):
             with conn.cursor() as cur:
                 # Vérification unicité
                 cur.execute("SELECT id FROM chat_history WHERE content_hash = %s", (content_hash,))
-                if cur.fetchone(): return
+                if cur.fetchone():
+                    return
 
                 # Génération Embedding
                 try:
@@ -242,50 +244,73 @@ def apply_gemini_edits(ai_response):
 # --- LOGIQUE PRINCIPALE ---
 
 def run():
-    # 1. Collecte des entrées (Arguments + Pipe) et détection du projet
+    # 1. GESTION DES ARGUMENTS
+    parser = argparse.ArgumentParser()
+    parser.add_argument("question", nargs="*", help="La question pour l'IA")
+    parser.add_argument("--mode", choices=["CHAT", "PLAN"], default="CHAT", help="Mode d'exécution")
+    parser.add_argument("--yes", action="store_true", help="Approuver automatiquement les modifs")
+    args = parser.parse_args()
+
+    current_user_question = " ".join(args.question)
+    is_plan_mode = (args.mode == "PLAN")
+
+    # 2. Configuration de la console selon le mode. On indique qu'on va modifier l'objet global
+    global console
+
+    # On utilise stderr pour les logs afin de laisser stdout au JSON en mode PLAN
+    console = Console(stderr=True) if is_plan_mode else Console()
+
+    # 2. Collecte des entrées (Arguments + Pipe) et détection du projet
     project_id = get_project_id()
-    user_question = " ".join(sys.argv[1:])
     context_data = sys.stdin.read() if not sys.stdin.isatty() else ""
 
-    if not user_question and not context_data:
-        console.print("[bold red]❌ Erreur : Aucun contenu fourni.[/bold red")
+    if not current_user_question and not context_data:
+        console.print("[bold red]❌ Erreur : Aucun contenu fourni.[/bold red]")
         return
 
-    # 2. Exécution d'ask.py avec un indicateur visuel global
+    # 3. Exécution d'ask.py avec un indicateur visuel global
     console.print(Rule("[bold green]Requête IA[/bold green]"))
 
     try:
         result = subprocess.run(
-            [PYTHON_BIN, ASK_SCRIPT, user_question],
+            [PYTHON_BIN, ASK_SCRIPT, current_user_question],
             input=context_data,
             stdout=subprocess.PIPE,
-            stderr=None,  # Stream direct du spinner et du debug de ask.py
+            stderr=subprocess.PIPE,  # Capturé pour analyse en cas d'erreur
             text=True,
             encoding='utf-8'
         )
 
         if result.returncode != 0:
             console.print(f"\n[bold red]🛑 Erreur fatale (Code {result.returncode})[/bold red]")
-            console.print(f"DEBUG STDOUT: {result.stdout}")
-            console.print(f"DEBUG STDERR: {result.stderr}")
+            console.print(f"[yellow]STDERR:[/yellow] {result.stderr}")
             return
 
         ai_response = result.stdout.strip()
         if not ai_response:
-            print("⚠️ Réponse vide reçue de l'IA.")
+            console.print("⚠️ Réponse vide reçue de l'IA.")
             return
 
-        # 3. Rendu de la réponse en Markdown dans un Panel
-        console.print("\n")
-        render_md = Markdown(ai_response)
-        console.print(
-            Panel(render_md, title="[bold green]Analyse du Modèle[/bold green]", border_style="green", expand=False))
+        # 4. Rendu de la réponse
+        if is_plan_mode:
+            # On cherche le JSON dans la réponse au cas où l'IA aurait bavardé
+            match = re.search(r'(\{.*\})', ai_response, re.DOTALL)
+            clean_json = match.group(1) if match else ai_response
 
-        # 4. Écriture des fichiers de sortie
+            console.print("[dim][Relais] Mode PLAN : Envoi JSON sur stdout...[/dim]")
+            sys.stdout.write(clean_json)
+            sys.stdout.flush()
+        else:
+            console.print("\n")
+            render_md = Markdown(ai_response)
+            console.print(
+                Panel(render_md, title="[bold green]Analyse[/bold green]", border_style="green", expand=False))
+
+        # 5. Écriture des fichiers de sortie et post-traitement
         console.print(Rule("[bold green]Post-traitement[/bold green]"))
 
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header = f"\n{'=' * 50}\nDATE   : {timestamp}\nPROMPT : {user_question}\n{'-' * 50}\n"
+        header = f"\n{'=' * 50}\nDATE   : {timestamp}\nPROMPT : {current_user_question}\n{'-' * 50}\n"
         full_entry = f"{header}{ai_response}\n"
 
         try:
@@ -298,7 +323,7 @@ def run():
             console.print(f"[bold red]❌ Erreur disque : {e}[/bold red]")
             return
 
-        # 5. APPLICATION DU PLAN
+        # 6. APPLICATION DU PLAN
         if "SEARCH:" in ai_response and "REPLACE:" in ai_response:
             console.print("\n")
             confirm_panel = Panel(
@@ -332,11 +357,11 @@ def run():
                 console.print(
                     "[yellow]⏩ Application ignorée. Les modifications sont conservées dans 'dernier_plan.md'.[/yellow]")
 
-        # 5. Lancement des indexations et résumés
+        # 7. Lancement des indexations et résumés
         index_interaction(full_entry, project_id)
-        update_global_summary(user_question, ai_response, project_id)
+        update_global_summary(current_user_question, ai_response, project_id)
 
-        console.print("[bold green]✔[/bold green] [bold cyan]Workflow terminé avec succès [{project_id}].[/bold cyan]")
+        console.print(f"[bold green]✔[/bold green] [bold cyan]Workflow terminé avec succès [{project_id}].[/bold cyan]")
 
     except Exception as e:
         console.print(f"[bold red]❌ Erreur système :[/bold red] {e}")

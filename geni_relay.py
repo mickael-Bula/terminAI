@@ -113,7 +113,8 @@ def get_remote_embedding(text):
         if response.status_code == 200:
             return response.json()['embedding']
         else:
-            raise Exception(f"Erreur lors de la génération de l'embedding distant: {response.status_code} - {response.text}")
+            raise Exception(f"Erreur lors de la génération de l'embedding distant: "
+                            f"{response.status_code} - {response.text}")
     except MemoryError as e:
         console.print(f"[bold red]⚠️ Mémoire insuffisante lors de la requête d'embedding distant : {e}[/bold red]")
         return None  # Ou une valeur par défaut, selon le cas
@@ -222,7 +223,8 @@ def run():
             register_vector(conn)
             cur = conn.cursor()
 
-            cur.execute("SELECT content FROM chat_history ORDER BY embedding <=> %s::vector LIMIT 3", (embedding,))
+            cur.execute("SELECT content FROM chat_history ORDER BY embedding <=> %s::vector LIMIT 3",
+                        (embedding,))
             rows = cur.fetchall()
             context_vectoriel = "\n".join([f"--- Souvenir {i + 1} ---\n{r[0]}" for i, r in enumerate(rows)])
             cur.close()

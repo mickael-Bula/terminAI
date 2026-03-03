@@ -215,3 +215,11 @@ Pour se connecter à la base vectorielle avec l'utilisateur dédié :
 
 1. Entrer dans le cotainer postgres depuis Proxmox : `$ pct enter 102`
 2. Se connecter à psql avec la chaîne suivante : `psql -h localhost -U mon_user -d ma_base`
+
+
+## Ajout d'une colonne project_id
+
+Pour permettre le suivi de différents projets, on ajoute une colonne **project_id** :
+
+```sql
+```
