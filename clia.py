@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import io
 import sys
 import psycopg2
 import tempfile
@@ -22,6 +23,11 @@ from rich.console import Console
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
+
+# Force l'encodage UTF-8 pour éviter les blocages de flux sous Windows Terminal
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # --- Initialisation ---
 console = Console()
@@ -66,17 +72,47 @@ def extract_single_range(lines, r_string, file_path):
 
 
 def get_repo_map():
-    """Génère ou récupère la carte du projet via Aider."""
+    """Génère ou récupère la carte du projet via Aider sans appel LLM inutile."""
     try:
+        # On ajoute --map-tokens pour s'assurer qu'il génère bien la sortie
+        # On peut aussi ajouter --no-git pour accélérer si on n'est pas dans un repo
+        cmd = [
+            "aider",
+            "--show-repo-map",
+            "--map-tokens", "2048",
+            "--no-git",
+            "--yes-always",
+            "--no-show-model-warnings",
+            "--no-pretty"  # Indispensable pour éviter les codes de contrôle
+        ]
+
         result = subprocess.run(
-            ["aider", "--show-repo-map", "--yes-always", "--no-show-model-warnings"],
-            capture_output=True,
-            text=True,
-            encoding='utf-8'
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            timeout=30  # Sécurité anti-blocage
         )
-        return result.stdout
-    except subprocess.SubprocessError:
-        return "Impossible de générer le repo-map."
+
+        if result.returncode == 0:
+            return result.stdout.decode('utf-8', errors='replace')
+
+        # Si erreur, on logue le stderr pour le debug interne
+        # print(f"Debug RepoMap Stderr: {result.stderr.decode('utf-8', errors='replace')}")
+        return ""
+
+    except subprocess.TimeoutExpired:
+        print("⚠️ Le RepoMap a mis trop de temps à répondre (Timeout).")
+        return ""
+    except Exception as e:
+        print(f"❌ Erreur RepoMap: {e}")
+        return ""
+
+
+def get_project_id():
+    """Identifie le projet par le nom du dossier courant."""
+    return os.path.basename(os.getcwd())
 
 
 def get_user_input():
@@ -99,20 +135,20 @@ def get_user_input():
 
 
 def clean_output(text):
-    """
-    Supprime les accents et normalise le texte pour éviter
-    les décalages de bordures dans le terminal.
-    """
+    """Nettoie les caractères ANSI et assure un encodage propre pour Windows."""
     if not text:
         return ""
 
-    # 1. Normalisation pour transformer "é" en "e"
-    nfkd_form = unicodedata.normalize('NFKD', text)
-    text = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+    # Si on reçoit des bytes, on décode
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', errors='replace')
 
-    # 2. On encode en ASCII en ignorant ce qui ne passe pas, puis on redécode
-    # Cela supprimera les caractères comme '©' ou 'A©' restants
-    return text.encode("ascii", "ignore").decode("ascii")
+    # Supprime les codes couleur ANSI qui font parfois bugger les Panels Rich
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    text = ansi_escape.sub('', text)
+
+    # Normalise les retours à la ligne
+    return text.replace('\r\n', '\n').strip()
 
 
 # Appel le relais pour piloter l'embedding
@@ -230,10 +266,6 @@ def execute_agentic_loop(plan):
                         console.print(f"[bold red]❌ Echec (Code {result.returncode})[/bold red]")
                         console.print(Panel(safe_error, title="Erreur", border_style="red"))
 
-                        # Optionnel : Arrêter l'agent en cas d'erreur shell
-                        if prompt("Arrêter tout le plan suite à cette erreur ? (o/N) : ").lower() == 'o':
-                            break
-
             elif tool == "aider":
                 files = step.get("files", [])
                 instruction = step.get("instruction", "")
@@ -246,19 +278,23 @@ def execute_agentic_loop(plan):
                     # On force le mode non-interactif et on désactive le stream pour économiser l'affichage
                     aider_cmd = [
                                     "aider",
-                                    "--model", "openrouter/google/gemini-2.0-flash-001",  # Modèle économique
+                                    "--model", "openrouter/google/gemini-2.0-flash-001",  # Modèle économe
                                     "--message", instruction,
                                     "--yes-always",
                                     "--no-auto-commits",  # On préfère garder la main sur les commits
-                                    "--no-show-model-warnings"
+                                    "--no-pretty",  # Pour éviter les erreurs de console invisible
+                                    "--no-show-model-warnings",
+                                    "--no-stream",  # Recommandé pour subprocess
                                 ] + files
 
-                    result = subprocess.run(aider_cmd, capture_output=True, text=False)
+                    env = os.environ.copy()
+                    env["TERM"] = "dumb"  # Dit à Aider de ne pas essayer de faire du design complexe
+                    result = subprocess.run(aider_cmd, capture_output=True, text=False, env=env)
 
                     if result.returncode == 0:
                         success = True
                         console.print(f"[bold green]✅ Fichiers modifiés : {', '.join(files)}[/bold green]")
-                        # 2. On traite la sortie d'Aider même en cas de succès
+                        # On traite la sortie d'Aider même en cas de succès
                         if result.stdout:
                             stdout_clean = result.stdout.decode('utf-8', errors='replace')
                             safe_output = clean_output(stdout_clean)
@@ -266,7 +302,7 @@ def execute_agentic_loop(plan):
                             # console.print(Panel(safe_output, title="Aider Output", border_style="magenta", height=15))
                             console.print(Panel(safe_output, title="Aider Output", border_style="magenta"))
                     else:
-                        # 3. Gestion propre des erreurs
+                        # Gestion propre des erreurs
                         stderr_clean = result.stderr.decode('utf-8', errors='replace')
                         safe_error = clean_output(stderr_clean)
                         console.print(f"[bold red]❌ Erreur Aider :[/bold red]")
@@ -290,19 +326,46 @@ def execute_agentic_loop(plan):
 
 def parse_ai_plan(text):
     """
-    Extrait et valide le JSON d'un plan d'action,
-    même si l'IA a ajouté du texte avant ou après.
+    Extrait et valide le JSON d'un plan d'action de manière robuste.
+    Gère le texte parasite, les balises Markdown et les caractères invisibles.
     """
-    text = text.replace("[PLAN]", "").replace("[/PLAN]", "").strip()
-    try:
-        # Tentative d'extraction via les balises Markdown
-        match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
-
-        if match:
-            data = json.loads(match.group(1))
-            return {"steps": data} if isinstance(data, list) else data
+    if not text:
         return None
-    except (json.JSONDecodeError, Exception):
+
+    # 1. Nettoyage préliminaire : on supprime les balises personnalisées et les espaces extrêmes
+    text = text.replace("[PLAN]", "").replace("[/PLAN]", "").strip()
+
+    # 2. Nettoyage des caractères de contrôle Windows (BOM, etc.) qui font échouer json.loads
+    text = text.encode('utf-8', 'ignore').decode('utf-8')
+
+    try:
+        # 3. Extraction par bloc : on cherche le PREMIER '{' et le DERNIER '}'
+        # Plus sûr que re.search pour les gros blocs JSON
+        start_idx = text.find('{')
+        end_idx = text.rfind('}')
+
+        if start_idx == -1 or end_idx == -1:
+            # Si pas d'accolades, on tente les crochets (dans le cas où l'IA renvoie juste une liste)
+            start_idx = text.find('[')
+            end_idx = text.rfind(']')
+
+        if start_idx != -1 and end_idx != -1:
+            json_candidate = text[start_idx:end_idx + 1]
+
+            # 4. Suppression des balises de code Markdown potentielles à l'intérieur du bloc
+            json_candidate = re.sub(r'```json|```', '', json_candidate).strip()
+
+            data = json.loads(json_candidate)
+
+            # 5. Normalisation : on veut toujours un dictionnaire avec une clé "steps"
+            if isinstance(data, list):
+                return {"steps": data}
+            return data
+
+        return None
+    except (json.JSONDecodeError, Exception) as e:
+        # En cas d'échec, on loggue l'erreur en debug
+        print(f"Debug Parsing Error: {e}")
         return None
 
 
@@ -358,13 +421,14 @@ def display_plan_table(plan):
         status_icon = "[green]✅[/green]" if step.get("status") == "completed" else "[yellow]⏳[/yellow]"
         s_id = str(step.get("id", ""))
         tool = step.get("tool", "???").upper()
-        desc = step.get("description", "")
+        desc = clean_encoding_for_terminal(step.get("description", ""))
 
         # On affiche soit les fichiers (Aider), soit la commande (Shell)
         if tool == "AIDER":
             target = ", ".join(step.get("files", []))
         else:
-            target = step.get("command", "")
+            # On nettoie la commande shell au cas où elle contiendrait des accents
+            target = clean_encoding_for_terminal(step.get("command", ""))
 
         table.add_row(status_icon, s_id, tool, desc, target)
 
@@ -417,12 +481,30 @@ def is_plan_fully_completed(plan):
     return all(step.get("status") == "completed" for step in plan["steps"])
 
 
+def clean_encoding_for_terminal(text):
+    if not text:
+        return ""
+    try:
+        # Si c'est déjà propre, on ne touche à rien
+        return text.encode('utf-8').decode('utf-8')
+    except UnicodeError:
+        try:
+            # On tente de réparer si c'est du latin-1 mal interprété
+            return text.encode('cp1252').decode('utf-8')
+        except:
+            # En dernier recours, on vire les caractères non-ascii pour éviter les losanges
+            return "".join(i for i in text if ord(i) < 128)
+
+
 # --- Fonction Principale ---
 
 def run():
     console.clear()
-    state = "CHAT"  # États : CHAT, PLAN, APPLY, RESET
+    state = "CHAT"  # États : CHAT, PLAN
     current_plan = load_plan()
+
+    # Récupération du projet courant
+    project_id = get_project_id()
 
     # Force l'encodage UTF-8 pour les communications avec le Shell Windows
     if sys.platform == "win32":
@@ -570,8 +652,12 @@ def run():
 
                     # Étape D : Requête SQL
                     console.log("[dim]Debug: Exécution recherche vectorielle...[/dim]")
-                    cur.execute("SELECT content FROM chat_history ORDER BY embedding <=> %s::vector LIMIT 3",
-                                (embedding,))
+                    cur.execute("SELECT content "
+                                "FROM chat_history "
+                                "WHERE project_id = %s "
+                                "ORDER BY embedding <=> %s::vector "
+                                "LIMIT 3",
+                                (project_id, embedding,))
 
                     rows = cur.fetchall()
                     console.log(f"[dim]Debug: {len(rows)} souvenirs trouvés.[/dim]")
@@ -668,21 +754,28 @@ QUESTION_UTILISATEUR : {main_prompt}"""
 
             proc = subprocess.run(
                 cmd,
-                input=full_prompt,
-                text=True,
+                input=full_prompt.encode('utf-8'),  # On encode l'input en bytes
+                text=False,  # On désactive le décodage auto
                 capture_output=True,
-                encoding='utf-8'
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
 
-            # Le debug stderr du relais s'affiche quand même pour l'utilisateur
+            # Décodage manuel sécurisé du stderr (les logs de debug)
             if proc.stderr:
-                # On affiche le stderr du relais car il contient vos logs de debug (DB, RepoMap)
-                # Mais on le met en "dim" pour ne pas polluer l'écran
-                console.print(f"[dim]{proc.stderr}[/dim]")
+                stderr_output = proc.stderr.decode('utf-8', errors='replace')
+                console.print(f"[dim]{stderr_output}[/dim]")
+
+            # Décodage manuel sécurisé du stdout (le résultat IA ou JSON)
+            stdout_output = ""
+            if proc.stdout:
+                # 1. Décodage initial
+                stdout_raw = proc.stdout.decode('utf-8', errors='replace')
+                # 2. Nettoyage des résidus d'encodage (Latin-1 / CP1252)
+                stdout_output = clean_encoding_for_terminal(stdout_raw)
 
             if state == "PLAN":
-                # Ici last_ai_response contiendra le JSON pur car glog_relay a filtré son stdout
-                last_ai_response = proc.stdout.strip()
+                # On utilise la version décodée manuellement
+                last_ai_response = stdout_output.strip()
                 plan = parse_ai_plan(last_ai_response)
 
                 if plan:
@@ -697,7 +790,7 @@ QUESTION_UTILISATEUR : {main_prompt}"""
                     console.print(last_ai_response)  # Affichage pour debug
             else:
                 # Mode CHAT classique
-                console.print(proc.stdout)
+                console.print(stdout_output)
 
         except Exception as e:
             console.print(f"[bold red]Erreur : {e}[/bold red]")

@@ -18,6 +18,17 @@ from cryptography.fernet import Fernet
 import requests
 import json
 import argparse
+import io
+
+# Force Windows à parler UTF-8 au niveau du système
+if os.name == 'nt':
+    os.system('chcp 65001 > nul')
+
+# Force l'UTF-8 pour les pipes Windows Terminal
+if sys.platform == "win32":
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
 
 # --- INITIALISATION ---
 load_dotenv()
@@ -53,6 +64,9 @@ def get_project_id():
 
 def index_interaction(full_text, project_id):
     """Calcule le hash, l'embedding et insère dans Postgres avec l'ID du projet."""
+    # Nettoyage préventif pour s'assurer que c'est de l'UTF-8 pur
+    if isinstance(full_text, bytes):
+        full_text = full_text.decode('utf-8', errors='replace')
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -191,6 +205,8 @@ IA : {ai_response[:2000]}
                         "[bold green]✔[/bold green] [bold cyan]Mémoire normative consolidée (via Relais).[/bold cyan]")
                     return
                 else:
+                    # Affiche l'erreur d'OpenRouter
+                    print(f"Erreur OpenRouter : {json.dumps(resp_json, indent=2)}")
                     raise KeyError("Clé 'choices' manquante dans la réponse du relais")
         except Exception as e:
             # Plus de transparence sur l'échec de consolidation
@@ -274,19 +290,22 @@ def run():
     try:
         result = subprocess.run(
             [PYTHON_BIN, ASK_SCRIPT, current_user_question],
-            input=context_data,
+            input=context_data.encode('utf-8'),  # On envoie des bytes
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,  # Capturé pour analyse en cas d'erreur
-            text=True,
-            encoding='utf-8'
+            stderr=subprocess.PIPE,
+            text=False,  # <--- ON PASSE EN BYTES pour éviter le crash du thread
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
+
+        # On décode manuellement avec "replace" pour les caractères 0xe8/0xea
+        ai_response = result.stdout.decode('utf-8', errors='replace').strip()
+        err_response = result.stderr.decode('utf-8', errors='replace').strip()
 
         if result.returncode != 0:
             console.print(f"\n[bold red]🛑 Erreur fatale (Code {result.returncode})[/bold red]")
-            console.print(f"[yellow]STDERR:[/yellow] {result.stderr}")
+            console.print(f"[yellow]STDERR:[/yellow] {err_response}")
             return
 
-        ai_response = result.stdout.strip()
         if not ai_response:
             console.print("⚠️ Réponse vide reçue de l'IA.")
             return
