@@ -78,36 +78,47 @@ def get_repo_map():
         # On peut aussi ajouter --no-git pour accélérer si on n'est pas dans un repo
         cmd = [
             "aider",
+            "--model", "openrouter/google/gemini-2.0-flash-001",  # On force le modèle économe
             "--show-repo-map",
             "--map-tokens", "2048",
-            "--no-git",
+            "--no-gitignore",
             "--yes-always",
             "--no-show-model-warnings",
-            "--no-pretty"  # Indispensable pour éviter les codes de contrôle
+            "--no-pretty",  # Indispensable pour éviter les codes de contrôle
+            "--no-suggest-shell-commands",  # Évite les calculs inutiles
+            "--no-check-update"  # Gagne du temps et du flux réseau
         ]
+
+        # On prépare un environnement qui dit à Aider qu'il n'y a PAS de terminal
+        env = os.environ.copy()
+        env["TERM"] = "dumb"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        # On force la clé ici API
+        env["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY")
 
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
+            env=env,  # Utilisation de l'env propre
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             timeout=30  # Sécurité anti-blocage
         )
 
-        if result.returncode == 0:
-            return result.stdout.decode('utf-8', errors='replace')
+        output = result.stdout.decode('utf-8', errors='replace')
 
-        # Si erreur, on logue le stderr pour le debug interne
-        # print(f"Debug RepoMap Stderr: {result.stderr.decode('utf-8', errors='replace')}")
-        return ""
+        # Nettoyage : Aider envoie parfois des infos de démarrage même avec --no-pretty
+        # On ne garde que ce qui ressemble à une arborescence (lignes commençant par des symboles ou des dossiers)
+        lines = output.splitlines()
+        clean_lines = [line for line in lines
+                       if not line.startswith("Using openrouter") and "model" not in line.lower()]
 
-    except subprocess.TimeoutExpired:
-        print("⚠️ Le RepoMap a mis trop de temps à répondre (Timeout).")
-        return ""
+        return "\n".join(clean_lines).strip()
+
     except Exception as e:
-        print(f"❌ Erreur RepoMap: {e}")
-        return ""
+        return f"Erreur technique RepoMap : {e}"
 
 
 def get_project_id():
@@ -185,6 +196,9 @@ def execute_agentic_loop(plan):
     """
     Exécute le plan avec validation manuelle et contrôle des sorties.
     """
+    discovery_made = False
+    discovery_output = ""
+
     if not plan or "steps" not in plan:
         console.print("[bold red]Plan invalide ou vide.[/bold red]")
         return
@@ -217,6 +231,8 @@ def execute_agentic_loop(plan):
         # --- PHASE DE VALIDATION ---
         if tool == 'shell':
             action_label = f"[bold green]SHELL[/bold green] -> [dim]{step.get('command')}[/dim]"
+        elif tool == 'get_repo_map':
+            action_label = f"[bold blue]EXPLORER[/bold blue] -> [dim]Génération de la carte du projet[/dim]"
         else:
             action_label = f"[bold magenta]AIDER[/bold magenta] -> [dim]{step.get('files')}[/dim]"
         console.print(f"Action prévue : {action_label}")
@@ -265,6 +281,18 @@ def execute_agentic_loop(plan):
 
                         console.print(f"[bold red]❌ Echec (Code {result.returncode})[/bold red]")
                         console.print(Panel(safe_error, title="Erreur", border_style="red"))
+
+            elif tool == "get_repo_map":
+                with console.status("[bold blue]Génération de la carte du projet...[/bold blue]"):
+                    repo_data = get_repo_map()
+                    if repo_data:
+                        success = True
+                        # On affiche un résumé pour l'utilisateur
+                        console.print(Panel(repo_data[:500] + "...", title="Repo Map (Extrait)", border_style="blue"))
+                        # Optionnel : On peut stocker ce résultat pour que l'IA le voit au prochain tour
+                        step["output"] = repo_data
+                    else:
+                        console.print("[red]❌ Impossible de générer le Repo Map.[/red]")
 
             elif tool == "aider":
                 files = step.get("files", [])
@@ -632,11 +660,7 @@ def run():
 
         with console.status("[bold blue]Appel du relais...[/bold blue]"):
             try:
-                # Étape A : Repo Map
-                console.log("[dim]Debug: Génération du RepoMap...[/dim]")
-                repo_map = get_repo_map()
-
-                # Étape B : Embedding distant
+                # Étape A : Embedding distant
                 console.log(f"[dim]Debug: Demande d'embedding pour: {main_prompt[:30]}...[/dim]")
                 embedding = get_remote_embedding(main_prompt)
 
@@ -644,13 +668,13 @@ def run():
                     console.log("[yellow]⚠️ Warning: Embedding non récupéré, recherche vectorielle sautée.[/yellow]")
                     context_vectoriel = "Indisponible (erreur embedding)."
                 else:
-                    # Étape C : Connexion DB
+                    # Étape B : Connexion DB
                     console.log(f"[dim]Debug: Connexion DB ({DB_CONFIG['host']})...[/dim]")
                     conn = psycopg2.connect(**DB_CONFIG)
                     register_vector(conn)
                     cur = conn.cursor()
 
-                    # Étape D : Requête SQL
+                    # Étape C : Requête SQL
                     console.log("[dim]Debug: Exécution recherche vectorielle...[/dim]")
                     cur.execute("SELECT content "
                                 "FROM chat_history "
@@ -682,21 +706,30 @@ def run():
             role_instruction = """
             TU ES UN GÉNÉRATEUR DE JSON PUR.
             Ta mission est de planifier des actions techniques en utilisant EXCLUSIVEMENT les outils suivants :
-            1. 'aider' : Pour modifier, créer ou lire des fichiers. (Nécessite 'files' et 'instruction')
-            2. 'shell' : Pour exécuter des commandes terminal (ls, mkdir, npm test, etc.). (Nécessite 'command')
+            1. 'get_repo_map' : [PRIORITAIRE POUR L'EXPLORATION] Utilise cet outil AVANT TOUTE CHOSE 
+                si tu ne connais pas l'emplacement d'un composant ou d'une fonction. 
+                Il est beaucoup plus rapide et précis que 'grep'.
+            2. 'aider' : Pour modifier, créer ou lire des fichiers. (Nécessite 'files' et 'instruction')
+            3. 'shell' : Pour exécuter des commandes terminal (ls, mkdir, npm test, etc.). (Nécessite 'command')
+                NE PAS l'utiliser pour chercher des fichiers si 'get_repo_map' suffit.
 
             STRUCTURE JSON OBLIGATOIRE :
             {
               "steps": [
                 {
                   "id": 1,
+                  "tool": "get_repo_map",
+                  "description": "Exploration de la structure du projet"
+                },
+                {
+                  "id": 2,
                   "tool": "aider",
                   "description": "Analyse du code source",
                   "files": ["src/main.js"],
                   "instruction": "Cherche la logique de connexion"
                 },
                 {
-                  "id": 2,
+                  "id": 3,
                   "tool": "shell",
                   "description": "Test de connectivité réseau",
                   "command": "ping -c 4 google.com"
@@ -723,7 +756,7 @@ def run():
 [/INSTRUCTION_ROLE]
 
 [STRUCTURE_DU_PROJET]
-{repo_map}
+Utilise l'outil 'get_repo_map' si tu as besoin de voir l'arborescence des fichiers.
 [/STRUCTURE_DU_PROJET]
 
 [CONTEXTE_FICHIERS]
