@@ -36,8 +36,6 @@ def ask_question(user_prompt, project_id):
     # Pile de modèles
     models = [
         "google/gemini-2.0-flash-001",
-        "google/gemini-2.0-pro-exp-02-05:free",
-        "meta-llama/llama-3.3-70b-instruct:free"
     ]
 
     with console.status("[bold blue]Initialisation via Relais [{project_id}]...[/bold blue]", spinner="dots") as status:

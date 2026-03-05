@@ -752,12 +752,17 @@ QUESTION_UTILISATEUR : {main_prompt}"""
             if state == "PLAN":
                 cmd.append("--yes")
 
+            # Crée une copie de l'environnement et force PYTHONIOENCODING
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+
             proc = subprocess.run(
                 cmd,
                 input=full_prompt.encode('utf-8'),  # On encode l'input en bytes
                 text=False,  # On désactive le décodage auto
                 capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                env=env  # On passe l'environnement forcé
             )
 
             # Décodage manuel sécurisé du stderr (les logs de debug)
@@ -765,13 +770,16 @@ QUESTION_UTILISATEUR : {main_prompt}"""
                 stderr_output = proc.stderr.decode('utf-8', errors='replace')
                 console.print(f"[dim]{stderr_output}[/dim]")
 
-            # Décodage manuel sécurisé du stdout (le résultat IA ou JSON)
+            # Décodage avec une sécurité supplémentaire
             stdout_output = ""
             if proc.stdout:
-                # 1. Décodage initial
-                stdout_raw = proc.stdout.decode('utf-8', errors='replace')
-                # 2. Nettoyage des résidus d'encodage (Latin-1 / CP1252)
-                stdout_output = clean_encoding_for_terminal(stdout_raw)
+                # On décode les bytes reçus. Si UTF-8 échoue, on tente CP1252 et on convertit
+                raw_bytes = proc.stdout
+                try:
+                    stdout_output = raw_bytes.decode('utf-8')
+                except UnicodeDecodeError:
+                    # Si Windows a forcé du CP1252, on répare
+                    stdout_output = raw_bytes.decode('cp1252', errors='replace')
 
             if state == "PLAN":
                 # On utilise la version décodée manuellement

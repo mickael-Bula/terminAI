@@ -106,5 +106,20 @@ Passez simplement la réponse texte de Gemini à la fonction `apply_gemini_edits
 
 Une commande : `git checkout .`. Elle supprime toutes les modifications qui ne sont pas dans la **staging area**.
 
+## TODO
+
+Le but de l'outil est de limiter le plus possible l'utilisation des tokens.
+L'idéal serait de tomber dans les plans gratuits.
+
+Il faut diviser les tâches de manière atomique.
+Aider doit être appelé avec des tâches très simples et limitées.
+
+- ne pas ajouter systématiquement le repo_map au prompt : créer un tool pour l'appeler
+- ajouter une commande **/commit** demandant à Aider de créer un commit des modifications présentes dans l'espace de travail.
+  - ajouter un fichier .aiderignore qu'Aider devra pre dre en compte pour créer son commit.
+  - le fichier .aiderignore contiendra les fichiers à ignorer, sans polluer le fichier .gitignore
+  - le message de commit créé doit être un résumé des modifications. Pas de signature d'Aider dans ce commit
+
+
 
 

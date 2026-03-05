@@ -119,9 +119,6 @@ def update_global_summary(user_query, ai_response, project_id):
     # Pile de modèles pour la consolidation
     archive_models = [
         "google/gemini-2.0-flash-001",
-        "google/gemini-2.0-pro-exp-02-05:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "openrouter/auto"
     ]
 
     cipher = Fernet(ENCRYPTION_KEY)
