@@ -5,7 +5,6 @@ import io
 import sys
 import psycopg2
 import tempfile
-import unicodedata
 from pgvector.psycopg2 import register_vector
 from dotenv import load_dotenv
 import requests
@@ -49,6 +48,16 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD")
 }
+
+# Définit une constante pour le formatage JSON strict
+JSON_CONTRACT = """
+RÈGLES DE FORMATAGE JSON (STRICTES) :
+1. Tu dois TOUJOURS retourner un objet avec la clé racine "steps".
+2. Chaque étape doit utiliser EXCLUSIVEMENT : "id", "tool", "description".
+3. Pour le tool "aider" : Tu dois fournir "files" (toujours une LISTE de strings) et "instruction".
+4. Pour le tool "shell" : Tu dois fournir "command".
+5. INTERDICTION : Ne jamais utiliser "PLAN", "step", "path" ou "file" (au singulier).
+"""
 
 
 # --- Fonctions Utilitaires ---
@@ -192,21 +201,20 @@ def get_remote_embedding(text):
         return None
 
 
-def execute_agentic_loop(plan):
+def execute_agentic_loop(plan, original_query):
     """
     Exécute le plan avec validation manuelle et contrôle des sorties.
+    Gère la normalisation des outils (read -> aider) et la réévaluation.
     """
-    discovery_made = False
-    discovery_output = ""
 
     if not plan or "steps" not in plan:
         console.print("[bold red]Plan invalide ou vide.[/bold red]")
-        return
+        return None
 
     steps = plan["steps"]
     total = len(steps)
 
-    # On s'assure que chaque étape a un champ status initial
+    # Initialisation des statuts
     for step in steps:
         if "status" not in step:
             step["status"] = "pending"
@@ -218,14 +226,26 @@ def execute_agentic_loop(plan):
     ))
 
     for i, step in enumerate(steps, 1):
-        # On saute les étapes déjà marquées comme 'completed'
         if step.get("status") == "completed":
-            console.print(f"[dim]⏭️ Étape {i + 1} déjà effectuée. Passage à la suivante...[/dim]")
+            console.print(f"[dim]⏭️ Étape {i} déjà effectuée. Passage à la suivante...[/dim]")
             continue
-        description = step.get("description", "Pas de description")
-        tool = str(step.get("tool", "")).lower()
 
-        # Affichage d'un en-tête d'étape clair
+        # --- NORMALISATION AGRESSIVE DES DONNÉES DE L'ÉTAPE ---
+        tool = str(step.get("tool", "")).lower()
+        # L'IA utilise souvent 'step' au lieu de 'description' en rééval
+        description = step.get("description") or step.get("step") or "Pas de description"
+        # L'IA utilise souvent 'path' (str) au lieu de 'files' (list)
+        files = step.get("files") or ([step.get("path")] if step.get("path") else [])
+        if isinstance(files, str): files = [files]
+
+        # Mapping des outils alternatifs vers 'aider'
+        if tool in ["read", "view", "analyze", "edit"]:
+            tool = "aider"
+
+        # Instruction pour Aider (priorité à l'instruction explicite, sinon description, sinon requête d'origine)
+        instruction = step.get("instruction") or description or f"Analyse pour : {original_query}"
+
+        # Affichage de l'en-tête
         console.print(f"\n[bold cyan]Step {i}/{total} :[/bold cyan] [white]{description}[/white]")
 
         # --- PHASE DE VALIDATION ---
@@ -233,9 +253,13 @@ def execute_agentic_loop(plan):
             action_label = f"[bold green]SHELL[/bold green] -> [dim]{step.get('command')}[/dim]"
         elif tool == 'get_repo_map':
             action_label = f"[bold blue]EXPLORER[/bold blue] -> [dim]Génération de la carte du projet[/dim]"
+        elif tool == 'aider':
+            action_label = f"[bold magenta]AIDER[/bold magenta] -> [dim]{files}[/dim]"
         else:
-            action_label = f"[bold magenta]AIDER[/bold magenta] -> [dim]{step.get('files')}[/dim]"
+            action_label = f"[bold red]INCONNU ({tool})[/bold red]"
+
         console.print(f"Action prévue : {action_label}")
+
         choice = prompt(HTML(
             f"<b><ansiyellow>Continuer ?</ansiyellow></b> "
             f"[<ansigreen>o</ansigreen>: Oui | "
@@ -249,36 +273,28 @@ def execute_agentic_loop(plan):
         elif choice == 's':
             console.print("[yellow]⏭️ Étape sautée.[/yellow]")
             continue
-        elif choice != 'o' and choice != '':
-            console.print("[dim]Entrée invalide, étape considérée comme sautée.[/dim]")
+        elif choice not in ['o', '']:
             continue
 
         # --- EXECUTION ---
+        success = False
         try:
-            success = False
             if tool == "shell":
                 cmd = step.get("command")
-                with console.status(f"[bold blue]Running:[/bold blue] {cmd}"):
-                    # On utilise shell=True pour supporter les pipes et redirections
-                    # On utilise text=False pour récupérer des bytes et gérer l'encodage
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=False)
+                if not cmd:
+                    console.print("[red]❌ Erreur : Commande shell manquante.[/red]")
+                    continue
 
+                with console.status(f"[bold blue]Running:[/bold blue] {cmd}"):
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=False)
                     if result.returncode == 0:
                         success = True
                         console.print("[bold green]✅ Succès[/bold green]")
                         if result.stdout:
-                            # On décode manuellement avec "ignore" ou "replace" pour les caractères rebelles
-                            stdout_clean = result.stdout.decode('utf-8', errors='replace')
-
-                            # On nettoie le texte et les accents proprement avant d'afficher dans le Panel
-                            safe_output = clean_output(stdout_clean)
+                            safe_output = clean_output(result.stdout.decode('utf-8', errors='replace'))
                             console.print(Panel(safe_output, title="Output", border_style="dim"))
-
                     else:
-                        # On décode manuellement avec "ignore" ou "replace" pour les caractères rebelles
-                        stderr_clean = result.stderr.decode('utf-8', errors='replace')
-                        safe_error = clean_output(stderr_clean)
-
+                        safe_error = clean_output(result.stderr.decode('utf-8', errors='replace'))
                         console.print(f"[bold red]❌ Echec (Code {result.returncode})[/bold red]")
                         console.print(Panel(safe_error, title="Erreur", border_style="red"))
 
@@ -286,53 +302,63 @@ def execute_agentic_loop(plan):
                 with console.status("[bold blue]Génération de la carte du projet...[/bold blue]"):
                     repo_data = get_repo_map()
                     if repo_data:
-                        success = True
-                        # On affiche un résumé pour l'utilisateur
-                        console.print(Panel(repo_data[:500] + "...", title="Repo Map (Extrait)", border_style="blue"))
-                        # Optionnel : On peut stocker ce résultat pour que l'IA le voit au prochain tour
-                        step["output"] = repo_data
+                        console.print("[green]✔ Structure récupérée. Réévaluation en cours...[/green]")
+
+                        proc = subprocess.run(
+                            [sys.executable, GLOG_PATH, original_query, "--mode", "PLAN", "--discovery"],
+                            input=repo_data.encode('utf-8'),
+                            text=False,
+                            capture_output=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                        )
+
+                        new_plan_raw = proc.stdout.decode('utf-8', errors='replace').strip()
+                        console.log(f"[blue][DEBUG RE-PLAN] Réponse IA : {new_plan_raw}[/blue]")
+
+                        new_plan = parse_ai_plan(new_plan_raw)
+
+                        if new_plan and isinstance(new_plan, dict) and "steps" in new_plan:
+                            new_plan["original_query"] = original_query
+                            save_plan(new_plan)
+                            display_plan_table(new_plan)
+                            # Récursion avec le nouveau plan
+                            return execute_agentic_loop(new_plan, original_query)
+                        else:
+                            console.print("[bold red]⚠️ Nouveau plan invalide.[/bold red]")
+                            console.print(Panel(new_plan_raw, title="Réponse brute IA"))
                     else:
-                        console.print("[red]❌ Impossible de générer le Repo Map.[/red]")
+                        console.print("[red]❌ Impossible de générer la carte.[/red]")
 
             elif tool == "aider":
-                files = step.get("files", [])
-                instruction = step.get("instruction", "")
+                if not files:
+                    console.print(
+                        "[yellow]⚠️ Aucun fichier spécifié pour Aider. Utilisation du contexte global.[/yellow]")
 
-                # Conversion auto si files est une string au lieu d'une liste
-                if isinstance(files, str):
-                    files = [files]
-
-                with console.status(f"[bold magenta]Aider travaille sur {files}...[/bold magenta]"):
-                    # On force le mode non-interactif et on désactive le stream pour économiser l'affichage
+                with console.status(f"[bold magenta]Aider travaille...[/bold magenta]"):
+                    # On s'assure que le message est envoyé proprement
                     aider_cmd = [
                                     "aider",
-                                    "--model", "openrouter/google/gemini-2.0-flash-001",  # Modèle économe
                                     "--message", instruction,
                                     "--yes-always",
-                                    "--no-auto-commits",  # On préfère garder la main sur les commits
-                                    "--no-pretty",  # Pour éviter les erreurs de console invisible
-                                    "--no-show-model-warnings",
-                                    "--no-stream",  # Recommandé pour subprocess
-                                ] + files
+                                    "--no-auto-commits",
+                                    "--no-pretty",
+                                    "--no-stream",
+                                ] + [f for f in files if os.path.exists(f)]
 
                     env = os.environ.copy()
-                    env["TERM"] = "dumb"  # Dit à Aider de ne pas essayer de faire du design complexe
+                    env["TERM"] = "dumb"
+
+                    # On laisse Aider s'afficher s'il y a un souci, ou on capture pour la propreté
                     result = subprocess.run(aider_cmd, capture_output=True, text=False, env=env)
 
                     if result.returncode == 0:
                         success = True
-                        console.print(f"[bold green]✅ Fichiers modifiés : {', '.join(files)}[/bold green]")
-                        # On traite la sortie d'Aider même en cas de succès
+                        console.print(f"[bold green]✅ Analyse terminée.[/bold green]")
                         if result.stdout:
-                            stdout_clean = result.stdout.decode('utf-8', errors='replace')
-                            safe_output = clean_output(stdout_clean)
-                            # On peut limiter la taille de l'output d'Aider qui est souvent très long
-                            # console.print(Panel(safe_output, title="Aider Output", border_style="magenta", height=15))
+                            safe_output = clean_output(result.stdout.decode('utf-8', errors='replace'))
                             console.print(Panel(safe_output, title="Aider Output", border_style="magenta"))
                     else:
-                        # Gestion propre des erreurs
-                        stderr_clean = result.stderr.decode('utf-8', errors='replace')
-                        safe_error = clean_output(stderr_clean)
+                        safe_error = clean_output(result.stderr.decode('utf-8', errors='replace'))
                         console.print(f"[bold red]❌ Erreur Aider :[/bold red]")
                         console.print(Panel(safe_error, title="Erreur Aider", border_style="red"))
 
@@ -340,16 +366,15 @@ def execute_agentic_loop(plan):
             console.print(f"[bold red]💥 Erreur critique : {e}[/bold red]")
             break
 
-        # Si la tâche est marquée comme Success, on change le statut de chaque étape réalisée :
         if success:
             step["status"] = "completed"
             save_plan(plan)
         else:
-            console.print("[yellow]⚠️ Étape non marquée comme terminée car l'outil a échoué.[/yellow]")
-            if prompt("Continuer le plan malgré l'échec ? (o/N) : ").lower() != 'o':
+            if prompt("Continuer malgré l'échec ? (o/N) : ").lower() != 'o':
                 break
 
     console.print(Panel("[bold green]🏁 Fin du cycle d'exécution.[/bold green]", border_style="green"))
+    return None
 
 
 def parse_ai_plan(text):
@@ -383,12 +408,36 @@ def parse_ai_plan(text):
             # 4. Suppression des balises de code Markdown potentielles à l'intérieur du bloc
             json_candidate = re.sub(r'```json|```', '', json_candidate).strip()
 
-            data = json.loads(json_candidate)
+            try:
+                data = json.loads(json_candidate)
 
-            # 5. Normalisation : on veut toujours un dictionnaire avec une clé "steps"
-            if isinstance(data, list):
-                return {"steps": data}
-            return data
+                # --- NORMALISATION ULTRA-ROBUSTE ---
+                steps = []
+                if isinstance(data, list):
+                    steps = data
+                elif isinstance(data, dict):
+                    # On cherche toutes les variantes possibles de clés
+                    steps = (data.get("steps") or
+                             data.get("plan") or
+                             data.get("PLAN") or
+                             data.get("actions") or
+                             [])
+
+                    # Si le dictionnaire n'a pas ces clés, mais ressemble à une étape unique
+                    if not steps and ("tool" in data or "step" in data):
+                        steps = [data]
+
+                # On reconstruit toujours un dictionnaire propre avec la clé "steps".
+                return {"steps": steps}
+
+            except json.JSONDecodeError:
+                # Tentative de sauvetage : corriger les erreurs communes (virgules traînantes)
+                try:
+                    # Supprime une virgule juste avant un crochet ou une accolade fermante
+                    json_str = re.sub(r',\s*([\]}])', r'\1', json_candidate)
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    return None
 
         return None
     except (json.JSONDecodeError, Exception) as e:
@@ -431,8 +480,8 @@ def display_plan_table(plan):
     """
     Affiche le plan d'action de l'IA sous forme de tableau Rich.
     """
-    if not plan or "steps" not in plan:
-        console.print("[bold red]Aucun plan valide à afficher.[/bold red]")
+    if not plan or "steps" not in plan or not plan["steps"]:
+        console.print("[bold yellow]⚠️ Le plan est vide ou mal formé.[/bold yellow]")
         return
 
     table = Table(title="📋 PLAN D'ACTION DE L'AGENT", show_header=True, header_style="bold magenta",
@@ -528,8 +577,11 @@ def clean_encoding_for_terminal(text):
 
 def run():
     console.clear()
-    state = "CHAT"  # États : CHAT, PLAN
     current_plan = load_plan()
+
+    # Si un plan est chargé, on récupère sa question d'origine tout de suite
+    if current_plan:
+        original_query = current_plan.get("original_query", "")
 
     # Récupération du projet courant
     project_id = get_project_id()
@@ -554,6 +606,10 @@ def run():
         color = "cyan" if state == "CHAT" else "bold yellow"
         console.print(f"\n[bold {color}]— MODE {state} —[/bold {color}]")
         main_prompt = get_user_input()  # Utilise la fonction prompt_toolkit existante
+
+        # LOG STRATÉGIQUE 1 : Capture du prompt propre
+        clean_prompt = main_prompt.replace("/plan", "").strip()
+        console.log(f"[blue][LOG] Prompt capturé : '{clean_prompt}' (Mode: {state})[/blue]")
 
         if not main_prompt:
             console.print("[bold red]Erreur : Question obligatoire.[/bold red]")
@@ -587,8 +643,12 @@ def run():
                         border_style="yellow"
                     ))
                 else:
+                    # RÉCUPÉRATION DU VRAI PROMPT :
+                    # On utilise le prompt qui a servi à créer le plan (stocké dans le JSON ou une variable)
+                    original_query = current_plan.get("original_query", "Tâche en cours")
+
                     # Exécution du plan
-                    execute_agentic_loop(current_plan)
+                    execute_agentic_loop(current_plan, original_query)
 
                     # Une fois le plan totalement réalisé, on supprime le fichier
                     if is_plan_fully_completed(current_plan):
@@ -713,13 +773,20 @@ def run():
             3. 'shell' : Pour exécuter des commandes terminal (ls, mkdir, npm test, etc.). (Nécessite 'command')
                 NE PAS l'utiliser pour chercher des fichiers si 'get_repo_map' suffit.
 
+            STRUCTURE JSON POUR get_repo_map :
+            {
+              "id": X,
+              "tool": "get_repo_map",
+              "description": "Exploration de la structure du projet"
+            }
+
             STRUCTURE JSON OBLIGATOIRE :
             {
               "steps": [
                 {
                   "id": 1,
                   "tool": "get_repo_map",
-                  "description": "Exploration de la structure du projet"
+                  "description": "Localisation d'un élément dans l'arborescence"
                 },
                 {
                   "id": 2,
@@ -746,7 +813,23 @@ def run():
             RÈGLE DE GRANULARITÉ : 
             - Chaque étape aider ne doit cibler qu'UN SEUL fichier à la fois. 
             - Si plusieurs fichiers doivent être modifiés, crée autant d'étapes que de fichiers.
+            
+            {JSON_CONTRACT}
             """
+
+        elif state == "DISCOVERY":  # Le mode appelé après get_repo_map
+            role_instruction = f"""
+            TU ES UN STRATÈGE TECHNIQUE. 
+            Tu viens de recevoir la structure du projet (repo_map). 
+            Analyse-la pour répondre à la question : '{original_query}'.
+            Génère un NOUVEAU plan d'action détaillé pour résoudre la requête.
+
+            {JSON_CONTRACT}
+
+            RÈGLE SPÉCIFIQUE DISCOVERY :
+            Maintenant que tu as la carte, privilégie 'aider' pour lire/analyser les fichiers pertinents.
+            """
+
         else:
             role_instruction = "\nRéponds en tant qu'expert technique. Analyse et suggère des solutions."
 
@@ -815,20 +898,38 @@ QUESTION_UTILISATEUR : {main_prompt}"""
                     stdout_output = raw_bytes.decode('cp1252', errors='replace')
 
             if state == "PLAN":
-                # On utilise la version décodée manuellement
                 last_ai_response = stdout_output.strip()
-                plan = parse_ai_plan(last_ai_response)
+
+                # LOG STRATÉGIQUE 2 : Sortie brute de l'IA
+                console.log("[blue][LOG] Réponse brute reçue de l'IA :[/blue]")
+                console.print(Panel(last_ai_response, title="Raw AI Output", border_style="dim"))
+
+                plan: dict = parse_ai_plan(last_ai_response)
 
                 if plan:
-                    current_plan = plan
-                    save_plan(current_plan)
-                    display_plan_table(current_plan)
-                    project_id = os.path.basename(os.getcwd())
-                    console.print(f"[bold green]✅ Plan chargé et sauvegardé. [{project_id}][/bold green]")
-                    console.print("[bold green]✅ Plan chargé. Tapez /apply pour exécuter.[/bold green]")
+                    # LOG STRATÉGIQUE 3 : Vérification du type et de la structure après parsing
+                    console.log(
+                        f"[blue][LOG] Type après parsing : {type(plan)} | Clés : {list(plan.keys()) if isinstance(plan, dict) else 'N/A'}[/blue]")
+
+                    if isinstance(plan, dict):
+                        # On injecte le prompt propre (celui sans la commande /plan)
+                        plan["original_query"] = clean_prompt
+
+                        # On met à jour la variable de scope
+                        original_query = clean_prompt
+
+                        current_plan = plan
+                        save_plan(current_plan)
+
+                        # LOG STRATÉGIQUE 4 : Confirmation de sauvegarde du contexte
+                        console.log(f"[green][LOG] original_query injectée : '{plan['original_query']}'[/green]")
+
+                        display_plan_table(current_plan)
+                        console.print(f"[bold green]✅ Plan chargé et sauvegardé. [/bold green]")
+                    else:
+                        console.print("[bold red]❌ Le format du plan reçu est invalide (Attendu: Dict).[/bold red]")
                 else:
                     console.print("[bold red]❌ Erreur de structure JSON reçue du relais.[/bold red]")
-                    console.print(last_ai_response)  # Affichage pour debug
             else:
                 # Mode CHAT classique
                 console.print(stdout_output)

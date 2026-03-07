@@ -55,6 +55,17 @@ PYTHON_BIN = os.environ.get('PYTHON_BIN', 'python')
 console = Console()
 
 
+# Définit une constante pour le formatage JSON strict
+JSON_CONTRACT = """
+RÈGLES DE FORMATAGE JSON (STRICTES) :
+1. Tu dois TOUJOURS retourner un objet avec la clé racine "steps".
+2. Chaque étape doit utiliser EXCLUSIVEMENT : "id", "tool", "description".
+3. Pour le tool "aider" : Tu dois fournir "files" (toujours une LISTE de strings) et "instruction".
+4. Pour le tool "shell" : Tu dois fournir "command".
+5. INTERDICTION : Ne jamais utiliser "PLAN", "step", "path" ou "file" (au singulier).
+"""
+
+
 # --- FONCTIONS DE SERVICE ---
 
 def get_project_id():
@@ -262,6 +273,7 @@ def run():
     parser.add_argument("question", nargs="*", help="La question pour l'IA")
     parser.add_argument("--mode", choices=["CHAT", "PLAN"], default="CHAT", help="Mode d'exécution")
     parser.add_argument("--yes", action="store_true", help="Approuver automatiquement les modifs")
+    parser.add_argument("--discovery", action="store_true", help="Mode réévaluation après repo-map")
     args = parser.parse_args()
 
     current_user_question = " ".join(args.question)
@@ -283,6 +295,32 @@ def run():
 
     # 3. Exécution d'ask.py avec un indicateur visuel global
     console.print(Rule("[bold green]Requête IA[/bold green]"))
+
+    if args.discovery:
+        # On garde une trace propre de la question d'origine
+        query_text = " ".join(args.question) if args.question else "Analyse du projet"
+
+        # On construit un prompt de "Mission de Réévaluation"
+        # On injecte le JSON_CONTRACT à la fin pour qu'il soit la dernière instruction lue (effet de primauté)
+        current_user_question = f"""
+        [CONTEXTE DE RÉÉVALUATION]
+        Tu viens de scanner le projet. Voici la structure réelle (repo_map) :
+        {context_data}
+
+        [MISSION]
+        En te basant EXCLUSIVEMENT sur cette structure, génère un plan d'action JSON pour répondre à : "{query_text}"
+
+        {JSON_CONTRACT}
+        """
+
+        # On vide context_data pour éviter la redondance dans le pipe
+        context_data = ""
+
+        # On force le mode PLAN pour le traitement du signal de sortie
+        is_plan_mode = True
+
+        # Affiche le prompt pour debug
+        console.log(f"[dim]Prompt final envoyé au relais : {current_user_question[:100]}...[/dim]")
 
     try:
         result = subprocess.run(
