@@ -22,6 +22,7 @@ from rich.console import Console
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.rule import Rule
 
 # Force l'encodage UTF-8 pour éviter les blocages de flux sous Windows Terminal
 if sys.platform == "win32":
@@ -48,16 +49,6 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD")
 }
-
-# Définit une constante pour le formatage JSON strict
-JSON_CONTRACT = """
-RÈGLES DE FORMATAGE JSON (STRICTES) :
-1. Tu dois TOUJOURS retourner un objet avec la clé racine "steps".
-2. Chaque étape doit utiliser EXCLUSIVEMENT : "id", "tool", "description".
-3. Pour le tool "aider" : Tu dois fournir "files" (toujours une LISTE de strings) et "instruction".
-4. Pour le tool "shell" : Tu dois fournir "command".
-5. INTERDICTION : Ne jamais utiliser "PLAN", "step", "path" ou "file" (au singulier).
-"""
 
 
 # --- Fonctions Utilitaires ---
@@ -201,6 +192,86 @@ def get_remote_embedding(text):
         return None
 
 
+def get_system_prompt(mode="PLAN", original_query=""):
+    """Centralise les instructions de rôle et le contrat JSON."""
+
+    # Le contrat JSON est le même pour PLAN et DISCOVERY
+    json_contract = """
+    RÉPONDS UNIQUEMENT EN JSON PUR.
+    STRUCTURE : {"steps": 
+                    [{"id": 1, "tool": "aider|shell|get_repo_map", "files": [], "instruction": "", "description": ""}]
+                }
+
+    RÈGLES STRICTES :
+    1. Outils autorisés : 'get_repo_map' (exploration), 'aider' (lecture/écriture), 'shell' (terminal).
+    2. INTERDICTION : 'read', 'view', 'search_string', 'grep'. Utilise 'aider' pour lire.
+    3. 'files' doit TOUJOURS être une liste [], même pour un seul fichier.
+    """
+
+    if mode == "PLAN":
+        # On passe par une variable intermédiaire pour ne pas avoir à doubler les accolades du JSON dans une f-string
+        instruction = """
+            TU ES UN GÉNÉRATEUR DE JSON PUR.
+            Ta mission est de planifier des actions techniques en utilisant EXCLUSIVEMENT les outils suivants :
+            1. 'get_repo_map' : [PRIORITAIRE POUR L'EXPLORATION] Utilise cet outil AVANT TOUTE CHOSE 
+                si tu ne connais pas l'emplacement d'un composant ou d'une fonction. 
+                Il est beaucoup plus rapide et précis que 'grep'.
+            2. 'aider' : Pour modifier, créer ou lire des fichiers. (Nécessite 'files' et 'instruction')
+            3. 'shell' : Pour exécuter des commandes terminal (ls, mkdir, npm test, etc.). (Nécessite 'command')
+                NE PAS l'utiliser pour chercher des fichiers si 'get_repo_map' suffit.
+
+            STRUCTURE JSON OBLIGATOIRE :
+            {
+        "steps": [
+                {
+        "id": 1,
+                  "tool": "get_repo_map",
+                  "description": "Exploration de la structure du projet"
+                },
+                {
+        "id": 2,
+                  "tool": "aider",
+                  "description": "Analyse du code source",
+                  "files": ["src/main.js"],
+                  "instruction": "Cherche la logique de connexion"
+                },
+                {
+        "id": 3,
+                  "tool": "shell",
+                  "description": "Test de connectivité réseau",
+                  "command": "ping -c 4 google.com"
+                }
+              ]
+            }
+
+            RÈGLES CRITIQUES :
+            - Ne propose JAMAIS d'outil autre que 'aider' ou 'shell'.
+            - Ne mets AUCUN texte avant ou après le JSON.
+            - Pas de balises [PLAN], pas de commentaires.
+            - Retourne uniquement l'objet JSON valide.
+
+            RÈGLE DE GRANULARITÉ : 
+            - Chaque étape aider ne doit cibler qu'UN SEUL fichier à la fois. 
+            - Si plusieurs fichiers doivent être modifiés, crée autant d'étapes que de fichiers.
+            """
+        return f"{instruction}\n{json_contract}"
+
+    if mode == "DISCOVERY":
+        return f"""
+            TU ES UN STRATÈGE TECHNIQUE. 
+            Tu viens de recevoir la structure du projet (repo_map). 
+            Analyse-la pour répondre à la question : '{original_query}'.
+            Génère un NOUVEAU plan d'action détaillé pour résoudre la requête.
+
+            {json_contract}
+
+            RÈGLE SPÉCIFIQUE DISCOVERY :
+            Maintenant que tu as la carte, privilégie 'aider' pour lire/analyser les fichiers pertinents.
+            """
+
+    return "Réponds en tant qu'expert technique. Analyse et suggère des solutions."
+
+
 def execute_agentic_loop(plan, original_query):
     """
     Exécute le plan avec validation manuelle et contrôle des sorties.
@@ -226,6 +297,42 @@ def execute_agentic_loop(plan, original_query):
     ))
 
     for i, step in enumerate(steps, 1):
+        if step.get("tool") == "get_repo_map":
+            with console.status("[bold blue]Génération de la carte du projet...[/bold blue]"):
+                repo_data = get_repo_map()
+
+                # On récupère le prompt et les instructions JSON
+                role_discovery = get_system_prompt("DISCOVERY")
+                full_discovery_prompt = f"{role_discovery}\n\n[REPO_MAP]\n{repo_data}\n\nQUESTION : {original_query}"
+
+                if repo_data:
+                    console.print("[green]✔ Structure récupérée. Réévaluation en cours...[/green]")
+
+                    proc = subprocess.run(
+                        [sys.executable, GLOG_PATH, original_query, "--mode", "PLAN", "--discovery"],
+                        input=full_discovery_prompt.encode('utf-8'),
+                        text=False,
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    )
+
+                    new_plan_raw = proc.stdout.decode('utf-8', errors='replace').strip()
+                    console.log(f"[blue][DEBUG RE-PLAN] Réponse IA : {new_plan_raw}[/blue]")
+
+                    new_plan = parse_ai_plan(new_plan_raw)
+
+                    if new_plan and isinstance(new_plan, dict) and "steps" in new_plan:
+                        new_plan["original_query"] = original_query
+                        save_plan(new_plan)
+                        display_plan_table(new_plan)
+                        # Récursion avec le nouveau plan
+                        return execute_agentic_loop(new_plan, original_query)
+                    else:
+                        console.print("[bold red]⚠️ Nouveau plan invalide.[/bold red]")
+                        console.print(Panel(new_plan_raw, title="Réponse brute IA"))
+                else:
+                    console.print("[red]❌ Impossible de générer la carte.[/red]")
+
         if step.get("status") == "completed":
             console.print(f"[dim]⏭️ Étape {i} déjà effectuée. Passage à la suivante...[/dim]")
             continue
@@ -579,9 +686,8 @@ def run():
     console.clear()
     current_plan = load_plan()
 
-    # Si un plan est chargé, on récupère sa question d'origine tout de suite
-    if current_plan:
-        original_query = current_plan.get("original_query", "")
+    # Récupère l'original_query si le plan existe, sinon chaîne vide
+    original_query = current_plan.get("original_query", "") if current_plan else ""
 
     # Récupération du projet courant
     project_id = get_project_id()
@@ -668,55 +774,64 @@ def run():
 
         if main_prompt.startswith("/plan"):
             state = "PLAN"
-            console.print("[bold yellow]📋 Mode Planificateur activé.[/bold yellow]")
-            # Si l'utilisateur a juste tapé "/plan", on s'arrête là pour ce tour
-            if main_prompt.strip() == "/plan":
+
+            # Extraction propre
+            temp_prompt = main_prompt[5:].strip()
+
+            if temp_prompt:
+                original_query = temp_prompt
+                console.print(f"[bold yellow]📋 Mission : {original_query}[/bold yellow]")
+            elif not original_query:
+                # Cas où l'utilisateur tape juste /plan sans mission préalable
+                console.print(
+                    "[red]❌ Erreur : Précisez votre mission après /plan (ex: /plan Créer une page de login)[/red]")
                 continue
 
         # --- Phase de Collecte de Contexte (Commune à CHAT et PLAN) ---
         # Note : On ne demande les fichiers que si on n'est pas déjà en train de dérouler un plan
         context_blocks = []
 
-        # 2. Affichage du panneau d'instruction pour la phase de fichiers
-        instruction_panel = Panel(
-            Group(
-                "[white]Saisissez les chemins des fichiers à inclure dans le contexte.[/white]",
-                "[dim]• TAB pour auto-compléter[/dim]",
-                "[dim]• ENTRÉE à vide pour valider et envoyer la requête[/dim]"
-            ),
-            title="[bold cyan]AJOUT DE FICHIERS[/bold cyan]",
-            title_align="left",
-            border_style="cyan",
-            padding=(1, 2),
-            expand=False
-        )
-        console.print(instruction_panel)
+        # 2. Affichage du panneau d'instruction pour la phase de fichiers (mode chat)
+        if not main_prompt.startswith("/") or main_prompt.startswith("/chat"):
+            instruction_panel = Panel(
+                Group(
+                    "[white]Saisissez les chemins des fichiers à inclure dans le contexte.[/white]",
+                    "[dim]• TAB pour auto-compléter[/dim]",
+                    "[dim]• ENTRÉE à vide pour valider et envoyer la requête[/dim]"
+                ),
+                title="[bold cyan]AJOUT DE FICHIERS[/bold cyan]",
+                title_align="left",
+                border_style="cyan",
+                padding=(1, 2),
+                expand=False
+            )
+            console.print(instruction_panel)
 
-        file_completer = PathCompleter()
-        while True:
-            f_input = prompt(HTML("<ansicyan><b>Fichier :</b></ansicyan> "), completer=file_completer).strip()
-            if not f_input:
-                break
+            file_completer = PathCompleter()
+            while True:
+                f_input = prompt(HTML("<ansicyan><b>Fichier :</b></ansicyan> "), completer=file_completer).strip()
+                if not f_input:
+                    break
 
-            f_path = f_input.replace('"', '').replace("'", "")
-            if not os.path.exists(f_path):
-                found = find_file_recursive(f_path)
-                if found:
-                    f_path = found
-                else:
-                    console.print("[red]Fichier non trouvé.[/red]")
-                    continue
+                f_path = f_input.replace('"', '').replace("'", "")
+                if not os.path.exists(f_path):
+                    found = find_file_recursive(f_path)
+                    if found:
+                        f_path = found
+                    else:
+                        console.print("[red]Fichier non trouvé.[/red]")
+                        continue
 
-            try:
-                with open(f_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                r_input = prompt(f"  Plage (ex: 1-20 / Entrée pour tout) : ").strip()
-                if not r_input:
-                    context_blocks.append(f"--- FICHIER : {f_path} ---\n" + "".join(lines))
-                else:
-                    context_blocks.append(extract_single_range(lines, r_input, f_path))
-            except Exception as e:
-                console.print(f"[red]Erreur : {e}[/red]")
+                try:
+                    with open(f_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    r_input = prompt(f"  Plage (ex: 1-20 / Entrée pour tout) : ").strip()
+                    if not r_input:
+                        context_blocks.append(f"--- FICHIER : {f_path} ---\n" + "".join(lines))
+                    else:
+                        context_blocks.append(extract_single_range(lines, r_input, f_path))
+                except Exception as e:
+                    console.print(f"[red]Erreur : {e}[/red]")
 
         with console.status("[bold blue]Appel du relais...[/bold blue]"):
             try:
@@ -763,73 +878,9 @@ def run():
         # --- Ajustement du Prompt selon le Mode ---
         files_context_string = "\n\n".join(context_blocks)
         if state == "PLAN":
-            role_instruction = """
-            TU ES UN GÉNÉRATEUR DE JSON PUR.
-            Ta mission est de planifier des actions techniques en utilisant EXCLUSIVEMENT les outils suivants :
-            1. 'get_repo_map' : [PRIORITAIRE POUR L'EXPLORATION] Utilise cet outil AVANT TOUTE CHOSE 
-                si tu ne connais pas l'emplacement d'un composant ou d'une fonction. 
-                Il est beaucoup plus rapide et précis que 'grep'.
-            2. 'aider' : Pour modifier, créer ou lire des fichiers. (Nécessite 'files' et 'instruction')
-            3. 'shell' : Pour exécuter des commandes terminal (ls, mkdir, npm test, etc.). (Nécessite 'command')
-                NE PAS l'utiliser pour chercher des fichiers si 'get_repo_map' suffit.
-
-            STRUCTURE JSON POUR get_repo_map :
-            {
-              "id": X,
-              "tool": "get_repo_map",
-              "description": "Exploration de la structure du projet"
-            }
-
-            STRUCTURE JSON OBLIGATOIRE :
-            {
-              "steps": [
-                {
-                  "id": 1,
-                  "tool": "get_repo_map",
-                  "description": "Localisation d'un élément dans l'arborescence"
-                },
-                {
-                  "id": 2,
-                  "tool": "aider",
-                  "description": "Analyse du code source",
-                  "files": ["src/main.js"],
-                  "instruction": "Cherche la logique de connexion"
-                },
-                {
-                  "id": 3,
-                  "tool": "shell",
-                  "description": "Test de connectivité réseau",
-                  "command": "ping -c 4 google.com"
-                }
-              ]
-            }
-
-            RÈGLES CRITIQUES :
-            - Ne propose JAMAIS d'outil autre que 'aider' ou 'shell'.
-            - Ne mets AUCUN texte avant ou après le JSON.
-            - Pas de balises [PLAN], pas de commentaires.
-            - Retourne uniquement l'objet JSON valide.
-
-            RÈGLE DE GRANULARITÉ : 
-            - Chaque étape aider ne doit cibler qu'UN SEUL fichier à la fois. 
-            - Si plusieurs fichiers doivent être modifiés, crée autant d'étapes que de fichiers.
-            
-            {JSON_CONTRACT}
-            """
-
+            role_instruction = get_system_prompt("PLAN")
         elif state == "DISCOVERY":  # Le mode appelé après get_repo_map
-            role_instruction = f"""
-            TU ES UN STRATÈGE TECHNIQUE. 
-            Tu viens de recevoir la structure du projet (repo_map). 
-            Analyse-la pour répondre à la question : '{original_query}'.
-            Génère un NOUVEAU plan d'action détaillé pour résoudre la requête.
-
-            {JSON_CONTRACT}
-
-            RÈGLE SPÉCIFIQUE DISCOVERY :
-            Maintenant que tu as la carte, privilégie 'aider' pour lire/analyser les fichiers pertinents.
-            """
-
+            role_instruction = get_system_prompt("DISCOVERY", original_query)
         else:
             role_instruction = "\nRéponds en tant qu'expert technique. Analyse et suggère des solutions."
 
@@ -871,6 +922,12 @@ QUESTION_UTILISATEUR : {main_prompt}"""
             # Crée une copie de l'environnement et force PYTHONIOENCODING
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+
+            # --- DEBUG STRATÉGIQUE ---
+            console.print(Rule("[bold purple]DEBUG : CONTENU ENVOYÉ À L'IA[/bold purple]"))
+            # On affiche les 500 premiers caractères pour voir si les instructions JSON sont là
+            console.print(f"[dim]{full_prompt[:500]}...[/dim]")
+            console.print(Rule(style="bold purple"))
 
             proc = subprocess.run(
                 cmd,

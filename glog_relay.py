@@ -322,6 +322,12 @@ def run():
         # Affiche le prompt pour debug
         console.log(f"[dim]Prompt final envoyé au relais : {current_user_question[:100]}...[/dim]")
 
+        if args.discovery:
+            # AFFICHE LE PROMPT COMPLET QUI VA PARTIR À L'IA
+            console.print(Rule("[bold red]VÉRIFICATION PROMPT FINAL (RELAIS)[/bold red]"))
+            console.print(current_user_question)
+            console.print(Rule(style="bold red"))
+
     try:
         result = subprocess.run(
             [PYTHON_BIN, ASK_SCRIPT, current_user_question],
