@@ -272,216 +272,137 @@ def get_system_prompt(mode="PLAN", original_query=""):
     return "Réponds en tant qu'expert technique. Analyse et suggère des solutions."
 
 
-def execute_agentic_loop(plan, original_query):
-    """
-    Exécute le plan avec validation manuelle et contrôle des sorties.
-    Gère la normalisation des outils (read -> aider) et la réévaluation.
-    """
-
-    if not plan or "steps" not in plan:
-        console.print("[bold red]Plan invalide ou vide.[/bold red]")
+def execute_agentic_loop(plan, original_query, discovery_depth=0):
+    # Sécurité : pas plus de 2 réévaluations automatiques par mission
+    if discovery_depth > 2:
+        console.print(
+            "[bold red]⚠️ Profondeur de découverte maximale atteinte. Arrêt pour éviter une boucle infinie.[/bold red]")
         return None
 
-    steps = plan["steps"]
+    steps = plan.get("steps", [])
     total = len(steps)
 
-    # Initialisation des statuts
-    for step in steps:
-        if "status" not in step:
-            step["status"] = "pending"
-
-    console.print(Panel(
-        f"🚀 [bold]Démarrage de l'exécution[/bold]\n"
-        f"L'agent va traiter {total} étapes une par une.",
-        border_style="yellow"
-    ))
-
     for i, step in enumerate(steps, 1):
-        if step.get("tool") == "get_repo_map":
-            with console.status("[bold blue]Génération de la carte du projet...[/bold blue]"):
+        tool = str(step.get("tool", "")).lower()
+
+        # --- 1. AUTOMATISATION DE L'EXPLORATION (SANS PROMPT) ---
+        if tool == "get_repo_map":
+            with console.status("[bold blue]🔍 Exploration automatique du projet...[/bold blue]"):
                 repo_data = get_repo_map()
 
-                # On récupère le prompt et les instructions JSON
+            if repo_data:
+                # On prépare la réévaluation immédiatement
                 role_discovery = get_system_prompt("DISCOVERY")
-                full_discovery_prompt = f"{role_discovery}\n\n[REPO_MAP]\n{repo_data}\n\nQUESTION : {original_query}"
+                full_prompt = f"{role_discovery}\n\n[REPO_MAP]\n{repo_data}\n\nQUESTION : {original_query}"
 
-                if repo_data:
-                    console.print("[green]✔ Structure récupérée. Réévaluation en cours...[/green]")
+                # On appelle le relais pour le nouveau plan
+                proc = subprocess.run(
+                    [sys.executable, GLOG_PATH, original_query, "--mode", "PLAN", "--discovery"],
+                    input=full_prompt.encode('utf-8'),
+                    capture_output=True,
+                    text=False
+                )
 
-                    proc = subprocess.run(
-                        [sys.executable, GLOG_PATH, original_query, "--mode", "PLAN", "--discovery"],
-                        input=full_discovery_prompt.encode('utf-8'),
-                        text=False,
-                        capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                    )
+                new_plan_raw = proc.stdout.decode('utf-8', errors='replace').strip()
+                new_plan = parse_ai_plan(new_plan_raw)
 
-                    new_plan_raw = proc.stdout.decode('utf-8', errors='replace').strip()
-                    console.log(f"[blue][DEBUG RE-PLAN] Réponse IA : {new_plan_raw}[/blue]")
+                if new_plan and "steps" in new_plan:
+                    console.print("[green]✨ Structure intégrée. Nouveau plan généré.[/green]")
+                    # RÉCURSION : On lance le nouveau plan
+                    return execute_agentic_loop(new_plan, original_query, discovery_depth + 1)
 
-                    new_plan = parse_ai_plan(new_plan_raw)
-
-                    if new_plan and isinstance(new_plan, dict) and "steps" in new_plan:
-                        new_plan["original_query"] = original_query
-                        save_plan(new_plan)
-                        display_plan_table(new_plan)
-                        # Récursion avec le nouveau plan
-                        return execute_agentic_loop(new_plan, original_query)
-                    else:
-                        console.print("[bold red]⚠️ Nouveau plan invalide.[/bold red]")
-                        console.print(Panel(new_plan_raw, title="Réponse brute IA"))
-                else:
-                    console.print("[red]❌ Impossible de générer la carte.[/red]")
-
-        if step.get("status") == "completed":
-            console.print(f"[dim]⏭️ Étape {i} déjà effectuée. Passage à la suivante...[/dim]")
+            # Si on arrive ici, c'est que le repo_map a été fait, on passe à la suite
             continue
 
-        # --- NORMALISATION AGRESSIVE DES DONNÉES DE L'ÉTAPE ---
-        tool = str(step.get("tool", "")).lower()
-        # L'IA utilise souvent 'step' au lieu de 'description' en rééval
-        description = step.get("description") or step.get("step") or "Pas de description"
-        # L'IA utilise souvent 'path' (str) au lieu de 'files' (list)
-        files = step.get("files") or ([step.get("path")] if step.get("path") else [])
-        if isinstance(files, str): files = [files]
+            # --- 2. VALIDATION MANUELLE POUR LES AUTRES OUTILS ---
+        # (Le code suivant ne sera exécuté QUE pour 'aider' ou 'shell')
 
-        # Mapping des outils alternatifs vers 'aider'
-        if tool in ["read", "view", "analyze", "edit"]:
-            tool = "aider"
+        description = step.get("description") or "Action en cours"
+        console.print(f"\n[bold cyan]Étape {i}/{total} :[/bold cyan] {description}")
 
-        # Instruction pour Aider (priorité à l'instruction explicite, sinon description, sinon requête d'origine)
-        instruction = step.get("instruction") or description or f"Analyse pour : {original_query}"
-
-        # Affichage de l'en-tête
-        console.print(f"\n[bold cyan]Step {i}/{total} :[/bold cyan] [white]{description}[/white]")
-
-        # --- PHASE DE VALIDATION ---
-        if tool == 'shell':
-            action_label = f"[bold green]SHELL[/bold green] -> [dim]{step.get('command')}[/dim]"
-        elif tool == 'get_repo_map':
-            action_label = f"[bold blue]EXPLORER[/bold blue] -> [dim]Génération de la carte du projet[/dim]"
-        elif tool == 'aider':
-            action_label = f"[bold magenta]AIDER[/bold magenta] -> [dim]{files}[/dim]"
-        else:
-            action_label = f"[bold red]INCONNU ({tool})[/bold red]"
-
-        console.print(f"Action prévue : {action_label}")
-
-        choice = prompt(HTML(
-            f"<b><ansiyellow>Continuer ?</ansiyellow></b> "
-            f"[<ansigreen>o</ansigreen>: Oui | "
-            f"<ansiyellow>s</ansiyellow>: Sauter | "
-            f"<ansired>q</ansired>: Quitter] > "
-        )).strip().lower()
+        # Utilisation de prompt() HORS de console.status
+        choice = prompt(HTML("<b><ansiyellow>Exécuter ? [o/s/q] ></ansiyellow></b> ")).strip().lower()
 
         if choice == 'q':
-            console.print("[bold red]🛑 Exécution interrompue par l'utilisateur.[/bold red]")
             break
-        elif choice == 's':
-            console.print("[yellow]⏭️ Étape sautée.[/yellow]")
-            continue
-        elif choice not in ['o', '']:
+        if choice == 's':
             continue
 
-        # --- EXECUTION ---
-        success = False
-        try:
-            if tool == "shell":
-                cmd = step.get("command")
-                if not cmd:
-                    console.print("[red]❌ Erreur : Commande shell manquante.[/red]")
-                    continue
-
-                with console.status(f"[bold blue]Running:[/bold blue] {cmd}"):
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=False)
-                    if result.returncode == 0:
-                        success = True
-                        console.print("[bold green]✅ Succès[/bold green]")
-                        if result.stdout:
-                            safe_output = clean_output(result.stdout.decode('utf-8', errors='replace'))
-                            console.print(Panel(safe_output, title="Output", border_style="dim"))
-                    else:
-                        safe_error = clean_output(result.stderr.decode('utf-8', errors='replace'))
-                        console.print(f"[bold red]❌ Echec (Code {result.returncode})[/bold red]")
-                        console.print(Panel(safe_error, title="Erreur", border_style="red"))
-
-            elif tool == "get_repo_map":
-                with console.status("[bold blue]Génération de la carte du projet...[/bold blue]"):
-                    repo_data = get_repo_map()
-                    if repo_data:
-                        console.print("[green]✔ Structure récupérée. Réévaluation en cours...[/green]")
-
-                        proc = subprocess.run(
-                            [sys.executable, GLOG_PATH, original_query, "--mode", "PLAN", "--discovery"],
-                            input=repo_data.encode('utf-8'),
-                            text=False,
-                            capture_output=True,
-                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                        )
-
-                        new_plan_raw = proc.stdout.decode('utf-8', errors='replace').strip()
-                        console.log(f"[blue][DEBUG RE-PLAN] Réponse IA : {new_plan_raw}[/blue]")
-
-                        new_plan = parse_ai_plan(new_plan_raw)
-
-                        if new_plan and isinstance(new_plan, dict) and "steps" in new_plan:
-                            new_plan["original_query"] = original_query
-                            save_plan(new_plan)
-                            display_plan_table(new_plan)
-                            # Récursion avec le nouveau plan
-                            return execute_agentic_loop(new_plan, original_query)
-                        else:
-                            console.print("[bold red]⚠️ Nouveau plan invalide.[/bold red]")
-                            console.print(Panel(new_plan_raw, title="Réponse brute IA"))
-                    else:
-                        console.print("[red]❌ Impossible de générer la carte.[/red]")
-
-            elif tool == "aider":
-                if not files:
-                    console.print(
-                        "[yellow]⚠️ Aucun fichier spécifié pour Aider. Utilisation du contexte global.[/yellow]")
-
-                with console.status(f"[bold magenta]Aider travaille...[/bold magenta]"):
-                    # On s'assure que le message est envoyé proprement
-                    aider_cmd = [
-                                    "aider",
-                                    "--message", instruction,
-                                    "--yes-always",
-                                    "--no-auto-commits",
-                                    "--no-pretty",
-                                    "--no-stream",
-                                ] + [f for f in files if os.path.exists(f)]
-
-                    env = os.environ.copy()
-                    env["TERM"] = "dumb"
-
-                    # On laisse Aider s'afficher s'il y a un souci, ou on capture pour la propreté
-                    result = subprocess.run(aider_cmd, capture_output=True, text=False, env=env)
-
-                    if result.returncode == 0:
-                        success = True
-                        console.print(f"[bold green]✅ Analyse terminée.[/bold green]")
-                        if result.stdout:
-                            safe_output = clean_output(result.stdout.decode('utf-8', errors='replace'))
-                            console.print(Panel(safe_output, title="Aider Output", border_style="magenta"))
-                    else:
-                        safe_error = clean_output(result.stderr.decode('utf-8', errors='replace'))
-                        console.print(f"[bold red]❌ Erreur Aider :[/bold red]")
-                        console.print(Panel(safe_error, title="Erreur Aider", border_style="red"))
-
-        except Exception as e:
-            console.print(f"[bold red]💥 Erreur critique : {e}[/bold red]")
-            break
-
-        if success:
-            step["status"] = "completed"
-            save_plan(plan)
-        else:
-            if prompt("Continuer malgré l'échec ? (o/N) : ").lower() != 'o':
-                break
-
-    console.print(Panel("[bold green]🏁 Fin du cycle d'exécution.[/bold green]", border_style="green"))
+        # --- 3. EXÉCUTION DES OUTILS STANDARDS ---
+        execute_standard_tool(step)
     return None
+
+
+def execute_standard_tool(step):
+    """Gère l'exécution technique des outils Aider et Shell."""
+    tool = str(step.get("tool", "")).lower()
+    files = step.get("files") or []
+    if isinstance(files, str):
+        files = [files]
+
+    success = False
+
+    # On calcule l'instruction
+    instruction = step.get("instruction") or step.get("description") or "Action"
+
+    if tool == "shell":
+        cmd = step.get("command")
+        if not cmd:
+            console.print("[red]❌ Commande shell manquante.[/red]")
+            return False
+
+        with console.status(f"[bold blue]Running:[/bold blue] {cmd}"):
+            # On utilise shell=True pour les commandes complexes
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=False)
+            if result.returncode == 0:
+                success = True
+                console.print("[bold green]✅ Succès[/bold green]")
+                if result.stdout:
+                    output = result.stdout.decode('utf-8', errors='replace')
+                    console.print(Panel(clean_output(output), title="Output", border_style="dim"))
+            else:
+                error = result.stderr.decode('utf-8', errors='replace')
+                console.print(f"[bold red]❌ Échec (Code {result.returncode})[/bold red]")
+                console.print(Panel(clean_output(error), title="Erreur", border_style="red"))
+
+    elif tool == "aider":
+        # Filtrer les fichiers qui existent vraiment pour éviter qu'Aider ne râle
+        valid_files = [f for f in files if os.path.exists(f)]
+
+        with console.status(f"[bold magenta]Aider travaille...[/bold magenta]"):
+            aider_cmd = [
+                            "aider",
+                            "--model", "openrouter/google/gemini-2.0-flash-001",
+                            "--weak-model", "openrouter/google/gemini-2.5-flash-lite",
+                            "--map-tokens", "1024",
+                            "--message", instruction,
+                            "--yes-always",
+                            "--no-auto-commits",
+                            "--no-pretty",
+                            "--no-stream",
+                        ] + valid_files
+
+            env = os.environ.copy()
+            env["TERM"] = "dumb"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["CHCP"] = "65001"
+
+            # Capture_output=True pour garder la console propre,
+            # mais attention au volume de texte sous Windows
+            result = subprocess.run(aider_cmd, capture_output=True, text=False, env=env)
+
+            if result.returncode == 0:
+                success = True
+                console.print(f"[bold green]✅ Modification/Analyse terminée.[/bold green]")
+                if result.stdout:
+                    output = result.stdout.decode('utf-8', errors='replace')
+                    console.print(Panel(clean_output(output), title="Aider Result", border_style="magenta"))
+            else:
+                error = result.stderr.decode('utf-8', errors='replace')
+                console.print(f"[bold red]❌ Erreur Aider[/bold red]")
+                console.print(Panel(clean_output(error), title="Détails Erreur", border_style="red"))
+
+    return success
 
 
 def parse_ai_plan(text):
