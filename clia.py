@@ -159,7 +159,10 @@ def clean_output(text):
     text = ansi_escape.sub('', text)
 
     # Normalise les retours à la ligne
-    return text.replace('\r\n', '\n').strip()
+    text = text.replace('\r\n', '\n')
+
+    # Supprime les espaces inutiles en fin de bloc, mais garde la structure globale
+    return text.rstrip()
 
 
 # Appel le relais pour piloter l'embedding
@@ -314,7 +317,7 @@ def execute_agentic_loop(plan, original_query, discovery_depth=0):
             # Si on arrive ici, c'est que le repo_map a été fait, on passe à la suite
             continue
 
-            # --- 2. VALIDATION MANUELLE POUR LES AUTRES OUTILS ---
+        # --- 2. VALIDATION MANUELLE POUR LES AUTRES OUTILS ---
         # (Le code suivant ne sera exécuté QUE pour 'aider' ou 'shell')
 
         description = step.get("description") or "Action en cours"
@@ -382,23 +385,30 @@ def execute_standard_tool(step):
                             "--no-stream",
                         ] + valid_files
 
+            # Copie de l'environnement pour configurer la sortie d'Aider en UTF-8
             env = os.environ.copy()
             env["TERM"] = "dumb"
             env["PYTHONIOENCODING"] = "utf-8"
-            env["CHCP"] = "65001"
+            env["PYTHONLEGACYWINDOWSSTDIO"] = "1"  # Empêche Python de revenir aux vieux modes Windows
 
-            # Capture_output=True pour garder la console propre,
-            # mais attention au volume de texte sous Windows
-            result = subprocess.run(aider_cmd, capture_output=True, text=False, env=env)
+            # On utilise text=True et encoding="utf-8" directement dans subprocess
+            # Cela évite de gérer le .decode() manuellement et gère le pipe correctement
+            result = subprocess.run(
+                aider_cmd,
+                capture_output=True,
+                text=True,  # On récupère directement du texte
+                encoding="utf-8",  # On impose le décodeur UTF-8
+                errors="replace",  # Sécurité si un caractère passe mal
+                env=env
+            )
 
             if result.returncode == 0:
                 success = True
                 console.print(f"[bold green]✅ Modification/Analyse terminée.[/bold green]")
                 if result.stdout:
-                    output = result.stdout.decode('utf-8', errors='replace')
-                    console.print(Panel(clean_output(output), title="Aider Result", border_style="magenta"))
+                    console.print(Panel(clean_output(result.stdout), title="Aider Result", border_style="magenta"))
             else:
-                error = result.stderr.decode('utf-8', errors='replace')
+                error = result.stderr
                 console.print(f"[bold red]❌ Erreur Aider[/bold red]")
                 console.print(Panel(clean_output(error), title="Détails Erreur", border_style="red"))
 
