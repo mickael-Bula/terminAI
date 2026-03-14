@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 
 # --- Importations Saisie (prompt_toolkit) ---
 from prompt_toolkit import prompt
-from prompt_toolkit.completion import PathCompleter
+from prompt_toolkit.completion import Completer, Completion, PathCompleter, WordCompleter, merge_completers
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style
 
@@ -25,6 +25,7 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.rule import Rule
+from rich.markup import escape
 
 # Force l'encodage UTF-8 pour éviter les blocages de flux sous Windows Terminal
 if sys.platform == "win32":
@@ -52,6 +53,38 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD")
 }
+
+
+class SmartCompleter(Completer):
+    def __init__(self):
+        self.modes = {
+            '@plan': 'Générer un plan d\'action JSON',
+            '@chat': 'Discuter librement avec l\'IA',
+            '@apply': 'Appliquer le plan actuel',
+            '@discovery': 'Lancer une phase d\'exploration',
+            '@quit': 'Quitter l\'outil',
+            '@exit': 'Quitter l\'outil',
+            '@show': 'Afficher le dernier plan',
+            '@reset': 'Supprimer le dernier plan',
+        }
+        self.file_completer = PathCompleter()
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+
+        # Si on commence par @, on suggère les modes
+        if text.startswith('@'):
+            for mode, desc in self.modes.items():
+                if mode.startswith(text.lower()):
+                    yield Completion(mode, start_position=-len(text), display_meta=desc)
+            return
+
+            # Sinon, on propose les fichiers (utile pour citer un fichier dans une question)
+        yield from self.file_completer.get_completions(document, complete_event)
+
+
+# Instance globale
+command_completer = SmartCompleter()
 
 
 # --- Fonctions Utilitaires ---
@@ -129,22 +162,38 @@ def get_project_id():
     return os.path.basename(os.getcwd())
 
 
-def get_user_input():
+def get_user_input(current_mode="PLAN"):
+    # On adapte la couleur du prompt selon le mode
+    mode_colors = {"PLAN": "#00ffff", "CHAT": "#00ff00", "APPLY": "#ff00ff"}
+    active_color = mode_colors.get(current_mode, "#00ffff")
+
     style = Style.from_dict({
-        'prompt': '#00ffff bold',
+        'prompt': f'{active_color} bold',
+        'completion-menu.completion': 'bg:#222222 #ffffff',
+        'completion-menu.completion.current': 'bg:#00ffff #000000',
+        'completion-menu.meta.completion': 'bg:#444444 #cccccc',
     })
 
     console.print(Panel(
-        "[bold white]Mode interactif[/bold white]\n[dim]Alt+Entrée pour valider | Ctrl+C pour quitter[/dim]",
-        title="[cyan] ASSISTANT IA (Fichiers + Mémoire + YAML) [/cyan]",
+        f"[bold white]Mode actuel : {current_mode}"
+        f"[/bold white]\n[dim]Alt+Entrée pour valider | Ctrl+C pour quitter[/dim]",
+        title="[cyan] ASSISTANT IA [/cyan]",
         title_align="left",
         border_style="cyan",
         expand=False
     ))
 
-    # Saisie multi-ligne avec prompt_toolkit
-    console.print("[bold cyan]\nQUESTION :[/bold cyan]")
-    text = prompt(HTML('<prompt><b> > </b></prompt>'), multiline=True, style=style)
+    console.print(f"[{active_color}]\nQUESTION :[/{active_color}]")
+
+    # Intégration du completer
+    text = prompt(
+        HTML(f'<style fg="{active_color}"><b> > </b></style>'),
+        multiline=True,
+        style=style,
+        completer=command_completer,
+        complete_while_typing=True
+    )
+
     return text.strip()
 
 
@@ -549,8 +598,8 @@ def display_plan_table(plan):
 
     console.print(table)
     console.print(
-        f"[dim italic]Tapez [/dim italic][bold cyan]/apply[/bold cyan][dim italic] pour lancer l'exécution ou "
-        f"[/dim italic][bold yellow]/chat[/bold yellow][dim italic] pour modifier le plan.[/dim italic]\n")
+        f"[dim italic]Tapez [/dim italic][bold cyan]@apply[/bold cyan][dim italic] pour lancer l'exécution ou "
+        f"[/dim italic][bold yellow]@chat[/bold yellow][dim italic] pour modifier le plan.[/dim italic]\n")
 
 
 def save_plan(plan):
@@ -606,7 +655,8 @@ def clean_encoding_for_terminal(text):
         try:
             # On tente de réparer si c'est du latin-1 mal interprété
             return text.encode('cp1252').decode('utf-8')
-        except:
+        # TODO : vérifier si la classe d'exception utilisée est adaptée
+        except IOError:
             # En dernier recours, on vire les caractères non-ascii pour éviter les losanges
             return "".join(i for i in text if ord(i) < 128)
 
@@ -642,34 +692,45 @@ def run():
         # 1. Récupération de l'input utilisateur (Mode commande ou Chat)
         color = "cyan" if state == "CHAT" else "bold yellow"
         console.print(f"\n[bold {color}]— MODE {state} —[/bold {color}]")
-        main_prompt = get_user_input()  # Utilise la fonction prompt_toolkit existante
+        main_prompt = get_user_input(current_mode=state)  # Utilise la fonction prompt_toolkit existante
 
-        # LOG STRATÉGIQUE 1 : Capture du prompt propre
-        clean_prompt = main_prompt.replace("/plan", "").strip()
-        console.log(f"[blue][LOG] Prompt capturé : '{clean_prompt}' (Mode: {state})[/blue]")
+        # --- Gestion des commandes de mode ---
+        if main_prompt.startswith('@'):
+            cmd = main_prompt[1:].lower()
+            if cmd in ['plan', 'chat', 'apply', 'discovery']:
+                state = cmd.upper()
+                console.print(f"[bold green]✔ Mode changé vers {state}[/bold green]")
+                continue  # On relance la boucle pour afficher le nouveau panel
+
+            # --- Gestion des Commandes de Bascule ---
+            elif cmd in ["@exit", "exit", "@quit", "quit"]:
+                break
+
+        clean_prompt = re.sub(
+            r'^@(plan|chat|apply|discovery|reset|show)\s*',
+            '',
+            main_prompt,
+            flags=re.IGNORECASE
+        ).strip()
 
         if not main_prompt:
             console.print("[bold red]Erreur : Question obligatoire.[/bold red]")
             continue
 
-        # --- Gestion des Commandes de Bascule ---
-        if main_prompt.lower() in ["/exit", "exit", "/quit"]:
-            break
-
         # Si le mode reset est sélectionné, on supprime le plan
-        if main_prompt.startswith("/reset"):
+        if main_prompt.startswith("@reset"):
             if os.path.exists(PLAN_FILE):
                 os.remove(PLAN_FILE)
                 current_plan = None
                 console.print("[bold green]♻️ Plan supprimé. Vous repartez sur une base propre.[/bold green]")
             continue
 
-        if main_prompt.startswith("/chat"):
+        if main_prompt.startswith("@chat"):
             state = "CHAT"
             console.print("[bold green]✅ Mode Architecte activé.[/bold green]")
             continue
 
-        if main_prompt.startswith("/apply"):
+        if main_prompt.startswith("@apply"):
             if state == "PLAN" and current_plan:
                 # --- SÉCURITÉ ---
                 if is_plan_fully_completed(current_plan):
@@ -695,15 +756,15 @@ def run():
                 console.print("[bold red]⚠️ Erreur : Aucun plan n'est chargé. Générez-en un avec /plan[/bold red]")
             continue
 
-        # --- Ajout de la commande /show ---
-        if main_prompt.startswith("/show"):
+        # --- Commande @show ---
+        if main_prompt.startswith("@show"):
             if current_plan:
                 display_plan_table(current_plan)
             else:
                 console.print("[yellow]Aucun plan en mémoire.[/yellow]")
             continue
 
-        if main_prompt.startswith("/plan"):
+        if main_prompt.startswith("@plan"):
             state = "PLAN"
 
             # Extraction propre
@@ -713,9 +774,9 @@ def run():
                 original_query = temp_prompt
                 console.print(f"[bold yellow]📋 Mission : {original_query}[/bold yellow]")
             elif not original_query:
-                # Cas où l'utilisateur tape juste /plan sans mission préalable
+                # Cas où l'utilisateur tape juste @plan sans mission préalable
                 console.print(
-                    "[red]❌ Erreur : Précisez votre mission après /plan (ex: /plan Créer une page de login)[/red]")
+                    "[red]❌ Erreur : Précisez votre mission après @plan (ex: @plan Créer une page de login)[/red]")
                 continue
 
         # --- Phase de Collecte de Contexte (Commune à CHAT et PLAN) ---
@@ -723,7 +784,7 @@ def run():
         context_blocks = []
 
         # 2. Affichage du panneau d'instruction pour la phase de fichiers (mode chat)
-        if not main_prompt.startswith("/") or main_prompt.startswith("/chat"):
+        if not main_prompt.startswith("@") or main_prompt.startswith("@chat"):
             instruction_panel = Panel(
                 Group(
                     "[white]Saisissez les chemins des fichiers à inclure dans le contexte.[/white]",
@@ -738,12 +799,15 @@ def run():
             )
             console.print(instruction_panel)
 
+            # On crée un PathCompleter pour les fichiers
             file_completer = PathCompleter()
+
             while True:
                 f_input = prompt(HTML("<ansicyan><b>Fichier :</b></ansicyan> "), completer=file_completer).strip()
                 if not f_input:
                     break
 
+                # --- AUCOMPLÉTION DES CHEMINS ---
                 f_path = f_input.replace('"', '').replace("'", "")
                 if not os.path.exists(f_path):
                     found = find_file_recursive(f_path)
@@ -767,21 +831,17 @@ def run():
         with console.status("[bold blue]Appel du relais...[/bold blue]"):
             try:
                 # Étape A : Embedding distant
-                console.log(f"[dim]Debug: Demande d'embedding pour: {main_prompt[:30]}...[/dim]")
                 embedding = get_remote_embedding(main_prompt)
 
                 if embedding is None:
-                    console.log("[yellow]⚠️ Warning: Embedding non récupéré, recherche vectorielle sautée.[/yellow]")
                     context_vectoriel = "Indisponible (erreur embedding)."
                 else:
                     # Étape B : Connexion DB
-                    console.log(f"[dim]Debug: Connexion DB ({DB_CONFIG['host']})...[/dim]")
                     conn = psycopg2.connect(**DB_CONFIG)
                     register_vector(conn)
                     cur = conn.cursor()
 
                     # Étape C : Requête SQL
-                    console.log("[dim]Debug: Exécution recherche vectorielle...[/dim]")
                     cur.execute("SELECT content "
                                 "FROM chat_history "
                                 "WHERE project_id = %s "
@@ -790,6 +850,7 @@ def run():
                                 (project_id, embedding,))
 
                     rows = cur.fetchall()
+                    # TODO : log à supprimer
                     console.log(f"[dim]Debug: {len(rows)} souvenirs trouvés.[/dim]")
                     context_vectoriel = "\n".join([f"- {r[0]}" for r in rows])
 
@@ -841,8 +902,6 @@ QUESTION_UTILISATEUR : {main_prompt}"""
                 console.print(f"[bold red]❌ Script IA introuvable : {GLOG_PATH}[/bold red]")
                 # Si on est sous Windows, on peut essayer de convertir le chemin si besoin
 
-            console.log(f"[dim]Debug: Exécution de {PYTHON_BIN} {GLOG_PATH}...[/dim]")
-
             # On prépare les arguments. On ajoute --mode selon l'état actuel
             cmd = [PYTHON_BIN, GLOG_PATH, main_prompt, "--mode", state]
 
@@ -857,7 +916,7 @@ QUESTION_UTILISATEUR : {main_prompt}"""
             # --- DEBUG STRATÉGIQUE ---
             console.print(Rule("[bold purple]DEBUG : CONTENU ENVOYÉ À L'IA[/bold purple]"))
             # On affiche les 500 premiers caractères pour voir si les instructions JSON sont là
-            console.print(f"[dim]{full_prompt[:500]}...[/dim]")
+            console.print(f"[dim]{escape(full_prompt[:500])}...[/dim]")
             console.print(Rule(style="bold purple"))
 
             proc = subprocess.run(
@@ -887,18 +946,9 @@ QUESTION_UTILISATEUR : {main_prompt}"""
 
             if state == "PLAN":
                 last_ai_response = stdout_output.strip()
-
-                # LOG STRATÉGIQUE 2 : Sortie brute de l'IA
-                console.log("[blue][LOG] Réponse brute reçue de l'IA :[/blue]")
-                console.print(Panel(last_ai_response, title="Raw AI Output", border_style="dim"))
-
                 plan: dict = parse_ai_plan(last_ai_response)
 
                 if plan:
-                    # LOG STRATÉGIQUE 3 : Vérification du type et de la structure après parsing
-                    console.log(
-                        f"[blue][LOG] Type après parsing : {type(plan)} | Clés : {list(plan.keys()) if isinstance(plan, dict) else 'N/A'}[/blue]")
-
                     if isinstance(plan, dict):
                         # On injecte le prompt propre (celui sans la commande /plan)
                         plan["original_query"] = clean_prompt
@@ -908,9 +958,6 @@ QUESTION_UTILISATEUR : {main_prompt}"""
 
                         current_plan = plan
                         save_plan(current_plan)
-
-                        # LOG STRATÉGIQUE 4 : Confirmation de sauvegarde du contexte
-                        console.log(f"[green][LOG] original_query injectée : '{plan['original_query']}'[/green]")
 
                         display_plan_table(current_plan)
                         console.print(f"[bold green]✅ Plan chargé et sauvegardé. [/bold green]")
