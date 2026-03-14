@@ -3,6 +3,8 @@ import re
 import subprocess
 import io
 import sys
+import time
+from pathlib import Path
 import psycopg2
 import tempfile
 from pgvector.psycopg2 import register_vector
@@ -39,6 +41,7 @@ RELAY_URL = os.getenv("RELAY_URL")
 
 # --- Configuration et Chemins ---
 LOCAL_BIN = os.getenv("LOCAL_BIN")
+AIDER_CONFIG_PATH = Path(LOCAL_BIN) / ".aider.conf.yml"
 GLOG_PATH = os.path.join(LOCAL_BIN, "glog_relay.py")
 PYTHON_BIN = sys.executable
 PLAN_FILE = "current_plan.json"
@@ -256,6 +259,13 @@ def get_system_prompt(mode="PLAN", original_query=""):
             RÈGLE DE GRANULARITÉ : 
             - Chaque étape aider ne doit cibler qu'UN SEUL fichier à la fois. 
             - Si plusieurs fichiers doivent être modifiés, crée autant d'étapes que de fichiers.
+            
+            RÈGLE D'OR POUR L'ATTRIBUT 'instruction' :
+            - Rédige l'instruction comme un ordre direct, technique et chirurgical à un exécuteur.
+            - Ne donne pas d'explications contextuelles inutiles 
+                (le contexte est déjà dans le fichier instructions.md d'Aider).
+            - Exemple : "Dans src/Entity/User.php, ajoute une propriété 'age' (int) 
+                avec attributs ORM et getters/setters."
             """
         return f"{instruction}\n{json_contract}"
 
@@ -372,45 +382,35 @@ def execute_standard_tool(step):
         # Filtrer les fichiers qui existent vraiment pour éviter qu'Aider ne râle
         valid_files = [f for f in files if os.path.exists(f)]
 
-        with console.status(f"[bold magenta]Aider travaille...[/bold magenta]"):
-            aider_cmd = [
-                            "aider",
-                            "--model", "openrouter/google/gemini-2.0-flash-001",
-                            "--weak-model", "openrouter/google/gemini-2.5-flash-lite",
-                            "--map-tokens", "1024",
-                            "--message", instruction,
-                            "--yes-always",
-                            "--no-auto-commits",
-                            "--no-pretty",
-                            "--no-stream",
-                        ] + valid_files
+        # 1. Préparation de l'environnement
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
 
-            # Copie de l'environnement pour configurer la sortie d'Aider en UTF-8
-            env = os.environ.copy()
-            env["TERM"] = "dumb"
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["PYTHONLEGACYWINDOWSSTDIO"] = "1"  # Empêche Python de revenir aux vieux modes Windows
+        # 2. Nettoyage de la commande
+        aider_cmd = [
+                        "winpty",  # Lance Aider dans un terminal winpty pour afficher les styles proprement
+                        "aider",
+                        "--message", instruction,
+                        "--config", str(AIDER_CONFIG_PATH)
+                    ] + valid_files
 
-            # On utilise text=True et encoding="utf-8" directement dans subprocess
-            # Cela évite de gérer le .decode() manuellement et gère le pipe correctement
-            result = subprocess.run(
-                aider_cmd,
-                capture_output=True,
-                text=True,  # On récupère directement du texte
-                encoding="utf-8",  # On impose le décodeur UTF-8
-                errors="replace",  # Sécurité si un caractère passe mal
-                env=env
-            )
+        # 3. Exécution propre
+        # On sort du 'with console.status' avant de lancer la commande Aider pour éviter les superpositions d'afichage
+        with console.status("[bold magenta]Aider prépare les modifications...[/bold magenta]"):
+            time.sleep(0.1)  # Petit délai pour laisser le spinner s'initialiser et se stabiliser
+            pass  # Préparation rapide si besoin
 
-            if result.returncode == 0:
-                success = True
-                console.print(f"[bold green]✅ Modification/Analyse terminée.[/bold green]")
-                if result.stdout:
-                    console.print(Panel(clean_output(result.stdout), title="Aider Result", border_style="magenta"))
-            else:
-                error = result.stderr
-                console.print(f"[bold red]❌ Erreur Aider[/bold red]")
-                console.print(Panel(clean_output(error), title="Détails Erreur", border_style="red"))
+        # Lancer le processus
+        result = subprocess.run(aider_cmd, env=env)
+
+        # Vérification du succès via le code de retour
+        if result.returncode == 0:
+            success = True
+            # console.print est inutile ici car Aider a déjà affiché son succès dans le terminal
+        else:
+            success = False
+            console.print(f"[bold red]❌ Aider a rencontré un problème (Code {result.returncode})[/bold red]")
 
     return success
 
