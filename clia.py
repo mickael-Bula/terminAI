@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 
 # --- Importations Saisie (prompt_toolkit) ---
 from prompt_toolkit import prompt
-from prompt_toolkit.completion import Completer, Completion, PathCompleter, WordCompleter, merge_completers
+from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style
 
@@ -79,7 +79,7 @@ class SmartCompleter(Completer):
                     yield Completion(mode, start_position=-len(text), display_meta=desc)
             return
 
-            # Sinon, on propose les fichiers (utile pour citer un fichier dans une question)
+            # Sinon, on propose les fichiers (utile pour citer un fichier dans une question).
         yield from self.file_completer.get_completions(document, complete_event)
 
 
@@ -111,12 +111,12 @@ def get_repo_map():
     """Génère ou récupère la carte du projet via Aider sans appel LLM inutile."""
     try:
         # On ajoute --map-tokens pour s'assurer qu'il génère bien la sortie
-        # On peut aussi ajouter --no-git pour accélérer si on n'est pas dans un repo
+        # On peut aussi ajouter --no-git pour accélérer si on n'est pas dans un repo.
         cmd = [
             "aider",
             "--model", "openrouter/google/gemini-2.0-flash-001",  # On force le modèle économe
             "--show-repo-map",
-            "--map-tokens", "2048",
+            "--map-tokens", "1024",
             "--no-gitignore",
             "--yes-always",
             "--no-show-model-warnings",
@@ -130,7 +130,7 @@ def get_repo_map():
         env["TERM"] = "dumb"
         env["PYTHONIOENCODING"] = "utf-8"
 
-        # On force la clé ici API
+        # On force la clé API
         env["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY")
 
         result = subprocess.run(
@@ -138,7 +138,7 @@ def get_repo_map():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
-            env=env,  # Utilisation de l'env propre
+            env=env,  # Utilisation de l'env configuré
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             timeout=30  # Sécurité anti-blocage
         )
@@ -162,32 +162,42 @@ def get_project_id():
     return os.path.basename(os.getcwd())
 
 
-def get_user_input(current_mode="PLAN"):
-    # On adapte la couleur du prompt selon le mode
-    mode_colors = {"PLAN": "#00ffff", "CHAT": "#00ff00", "APPLY": "#ff00ff"}
-    active_color = mode_colors.get(current_mode, "#00ffff")
+def get_user_input(current_mode="CHAT"):
+    # 1. Configuration des couleurs (Rich utilise des noms ou Hex, prompt_toolkit accepte Hex)
+    # Déclare une couleur pour chaque mode.
+    config = {
+        "APPLY": {"hex": "#ffff00"},  # Jaune pur
+        "CHAT": {"hex": "#00ffff"},  # Cyan pur
+        "DISCOVERY": {"hex": "#ff00ff"},  # Magenta pur
+        "PLAN": {"hex": "#00ff00"}  # Vert pur
+    }
 
+    mode_info = config.get(current_mode, config["CHAT"])
+    active_hex = mode_info["hex"]
+
+    # 2. Style pour prompt_toolkit (Le menu de complétion)
     style = Style.from_dict({
-        'prompt': f'{active_color} bold',
+        'prompt': f'{active_hex} ',
+        # On harmonise la barre de sélection du menu avec la couleur du mode
         'completion-menu.completion': 'bg:#222222 #ffffff',
-        'completion-menu.completion.current': 'bg:#00ffff #000000',
+        'completion-menu.completion.current': f'bg:{active_hex} #000000',
         'completion-menu.meta.completion': 'bg:#444444 #cccccc',
     })
 
+    # 3. Affichage du Panel Rich (Harmonisé)
     console.print(Panel(
-        f"[bold white]Mode actuel : {current_mode}"
-        f"[/bold white]\n[dim]Alt+Entrée pour valider | Ctrl+C pour quitter[/dim]",
-        title="[cyan] ASSISTANT IA [/cyan]",
+        f"[dim]Alt+Entrée pour valider | Ctrl+C pour quitter[/dim]",
+        title=f"[{active_hex}]MODE {current_mode}[/{active_hex}]",
         title_align="left",
-        border_style="cyan",
+        border_style=active_hex,  # Bordure harmonisée
         expand=False
     ))
 
-    console.print(f"[{active_color}]\nQUESTION :[/{active_color}]")
+    console.print(f"[{active_hex}]\nQUESTION :[/{active_hex}]")
 
-    # Intégration du completer
+    # 4. Saisie avec prompt_toolkit
     text = prompt(
-        HTML(f'<style fg="{active_color}"><b> > </b></style>'),
+        HTML(f'<prompt> > </prompt>'),
         multiline=True,
         style=style,
         completer=command_completer,
@@ -338,7 +348,8 @@ def execute_agentic_loop(plan, original_query, discovery_depth=0):
     # Sécurité : pas plus de 2 réévaluations automatiques par mission
     if discovery_depth > 2:
         console.print(
-            "[bold red]⚠️ Profondeur de découverte maximale atteinte. Arrêt pour éviter une boucle infinie.[/bold red]")
+            f"[bold red]⚠️ Profondeur de découverte maximale atteinte. "
+            f"Arrêt pour éviter une boucle infinie.[/bold red]")
         return None
 
     steps = plan.get("steps", [])
@@ -445,7 +456,7 @@ def execute_standard_tool(step):
                     ] + valid_files
 
         # 3. Exécution propre
-        # On sort du 'with console.status' avant de lancer la commande Aider pour éviter les superpositions d'afichage
+        # On sort du 'with' avant de lancer la commande Aider pour éviter les superpositions d'afichage
         with console.status("[bold magenta]Aider prépare les modifications...[/bold magenta]"):
             time.sleep(0.1)  # Petit délai pour laisser le spinner s'initialiser et se stabiliser
             pass  # Préparation rapide si besoin
@@ -456,7 +467,7 @@ def execute_standard_tool(step):
         # Vérification du succès via le code de retour
         if result.returncode == 0:
             success = True
-            # console.print est inutile ici car Aider a déjà affiché son succès dans le terminal
+            # console.print est inutile ici, car Aider a déjà affiché son succès dans le terminal
         else:
             success = False
             console.print(f"[bold red]❌ Aider a rencontré un problème (Code {result.returncode})[/bold red]")
@@ -485,7 +496,7 @@ def parse_ai_plan(text):
         end_idx = text.rfind('}')
 
         if start_idx == -1 or end_idx == -1:
-            # Si pas d'accolades, on tente les crochets (dans le cas où l'IA renvoie juste une liste)
+            # Si pas d'accolades, on tente les crochets (dans le cas où l'IA renvoie juste une liste).
             start_idx = text.find('[')
             end_idx = text.rfind(']')
 
@@ -521,7 +532,7 @@ def parse_ai_plan(text):
                 # Tentative de sauvetage : corriger les erreurs communes (virgules traînantes)
                 try:
                     # Supprime une virgule juste avant un crochet ou une accolade fermante
-                    json_str = re.sub(r',\s*([\]}])', r'\1', json_candidate)
+                    json_str = re.sub(r',\s*([]}])', r'\1', json_candidate)
                     return json.loads(json_str)
                 except json.JSONDecodeError:
                     return None
@@ -587,7 +598,7 @@ def display_plan_table(plan):
         tool = step.get("tool", "???").upper()
         desc = clean_encoding_for_terminal(step.get("description", ""))
 
-        # On affiche soit les fichiers (Aider), soit la commande (Shell)
+        # On affiche soit les fichiers (Aider), soit la commande (Shell).
         if tool == "AIDER":
             target = ", ".join(step.get("files", []))
         else:
@@ -611,7 +622,7 @@ def save_plan(plan):
             json.dump(plan, tmp, indent=4, ensure_ascii=False)
 
         # Remplacement atomique du fichier final par le temporaire
-        # Sur Windows, os.replace écrase le fichier existant sans erreur
+        # Sur Windows, la fonction 'replace' du module 'os' écrase le fichier existant sans lever une erreur.
         os.replace(temp_path, PLAN_FILE)
         console.print(f"[dim]💾 Plan sauvegardé dans {PLAN_FILE}[/dim]")
 
@@ -655,8 +666,7 @@ def clean_encoding_for_terminal(text):
         try:
             # On tente de réparer si c'est du latin-1 mal interprété
             return text.encode('cp1252').decode('utf-8')
-        # TODO : vérifier si la classe d'exception utilisée est adaptée
-        except IOError:
+        except (UnicodeEncodeError, UnicodeDecodeError):
             # En dernier recours, on vire les caractères non-ascii pour éviter les losanges
             return "".join(i for i in text if ord(i) < 128)
 
@@ -690,8 +700,6 @@ def run():
 
     while True:
         # 1. Récupération de l'input utilisateur (Mode commande ou Chat)
-        color = "cyan" if state == "CHAT" else "bold yellow"
-        console.print(f"\n[bold {color}]— MODE {state} —[/bold {color}]")
         main_prompt = get_user_input(current_mode=state)  # Utilise la fonction prompt_toolkit existante
 
         # --- Gestion des commandes de mode ---
@@ -699,7 +707,7 @@ def run():
             cmd = main_prompt[1:].lower()
             if cmd in ['plan', 'chat', 'apply', 'discovery']:
                 state = cmd.upper()
-                console.print(f"[bold green]✔ Mode changé vers {state}[/bold green]")
+                console.clear()
                 continue  # On relance la boucle pour afficher le nouveau panel
 
             # --- Gestion des Commandes de Bascule ---

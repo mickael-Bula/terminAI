@@ -236,7 +236,7 @@ def apply_gemini_edits(ai_response):
     for file_path, search_text, replace_text in matches:
         file_path = file_path.strip().replace('`', '').replace("'", "")
 
-        # Nettoyage des balises markdown
+        # Nettoyage des balises Markdown.
         def clean(t):
             t = t.strip()
             t = re.sub(r'^```[a-z]*\n', '', t, flags=re.IGNORECASE)
@@ -301,7 +301,7 @@ def run():
         query_text = " ".join(args.question) if args.question else "Analyse du projet"
 
         # On construit un prompt de "Mission de Réévaluation"
-        # On injecte le JSON_CONTRACT à la fin pour qu'il soit la dernière instruction lue (effet de primauté)
+        # On injecte le JSON_CONTRACT à la fin pour qu'il soit la dernière instruction lue (effet de primauté).
         current_user_question = f"""
         [CONTEXTE DE RÉÉVALUATION]
         Tu viens de scanner le projet. Voici la structure réelle (repo_map) :
@@ -313,13 +313,14 @@ def run():
         {JSON_CONTRACT}
         """
 
-        # On vide context_data pour éviter la redondance dans le pipe
+        # On vide context_data pour éviter la redondance dans le pipe.
         context_data = ""
 
         # On force le mode PLAN pour le traitement du signal de sortie
         is_plan_mode = True
 
         # Affiche le prompt pour debug
+        # TODO : message de debug à supprimer
         console.log(f"[dim]Prompt final envoyé au relais : {current_user_question[:100]}...[/dim]")
 
         if args.discovery:
@@ -354,7 +355,7 @@ def run():
         # 4. Rendu de la réponse
         if is_plan_mode:
             # On cherche le JSON dans la réponse au cas où l'IA aurait bavardé
-            match = re.search(r'(\{.*\})', ai_response, re.DOTALL)
+            match = re.search(r'(\{.*})', ai_response, re.DOTALL)
             clean_json = match.group(1) if match else ai_response
 
             console.print("[dim][Relais] Mode PLAN : Envoi JSON sur stdout...[/dim]")
@@ -395,7 +396,7 @@ def run():
             )
             console.print(confirm_panel)
 
-            # Gestion de l'input même si stdin est utilisé par un pipe
+            # Gestion de l'input même si stdin est utilisé par le pipe.
             try:
                 # Sous Windows, on utilise 'CON' pour lire le terminal directement, '/dev/tty' sous Linux/Mac.
                 term_path = 'CON' if os.name == 'nt' else '/dev/tty'
@@ -415,13 +416,15 @@ def run():
                 apply_gemini_edits(ai_response)
             else:
                 console.print(
-                    "[yellow]⏩ Application ignorée. Les modifications sont conservées dans 'dernier_plan.md'.[/yellow]")
+                    f"[yellow]⏩ Application ignorée. "
+                    f"Les modifications sont conservées dans 'dernier_plan.md'.[/yellow]")
 
         # 7. Lancement des indexations et résumés
         index_interaction(full_entry, project_id)
         update_global_summary(current_user_question, ai_response, project_id)
 
-        console.print(f"[bold green]✔[/bold green] [bold cyan]Workflow terminé avec succès [{project_id}].[/bold cyan]")
+        console.print(f"[bold green]✔[/bold green] "
+                      f"[bold cyan]Workflow terminé avec succès [{project_id}].[/bold cyan]")
 
     except Exception as e:
         console.print(f"[bold red]❌ Erreur système :[/bold red] {e}")
