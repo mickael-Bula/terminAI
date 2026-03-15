@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.rule import Rule
 from cryptography.fernet import Fernet
 import requests
@@ -73,6 +74,27 @@ def get_project_id():
     return os.path.basename(os.getcwd())
 
 
+def extract_essential_content(text):
+    """Supprime les blocs de code SEARCH/REPLACE et le JSON pour n'indexer que l'intention."""
+    # 1. Supprimer les blocs SEARCH/REPLACE
+    # On cherche tout ce qui est entre FILE: et END
+    clean_text = re.sub(r'FILE:.*?END', '[Bloc de modification de code supprimé]', text, flags=re.DOTALL)
+
+    # 2. Supprimer les blocs JSON (souvent les plans d'action)
+    clean_text = re.sub(r'```json.*?```', '[Plan JSON supprimé]', clean_text, flags=re.DOTALL)
+
+    # 3. Nettoyer les sauts de ligne excessifs
+    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+
+    # 4. Garder une trace des fichiers mentionnés (utile pour la recherche)
+    files_found = re.findall(r'FILE:\s*`(.+?)`', text)
+    if files_found:
+        file_list = ", ".join(set(files_found))
+        clean_text += f"\n\nFichiers modifiés : {file_list}"
+
+    return clean_text
+
+
 def index_interaction(full_text, project_id):
     """Calcule le hash, l'embedding et insère dans Postgres avec l'ID du projet."""
     # Nettoyage préventif pour s'assurer que c'est de l'UTF-8 pur
@@ -83,8 +105,15 @@ def index_interaction(full_text, project_id):
         if not api_key:
             return
 
+        # --- On réduit le texte enregistré en base ---
+        text_for_index = extract_essential_content(full_text)
+
+        # S'il ne reste rien après nettoyage, on ne procède pas à l'indexation.
+        if len(text_for_index) < 10:
+            return
+
         client = genai.Client(api_key=api_key)
-        content_hash = hashlib.md5(full_text.encode('utf-8')).hexdigest()
+        content_hash = hashlib.md5(text_for_index.encode('utf-8')).hexdigest()
 
         with psycopg2.connect(**DB_CONFIG) as conn:
             register_vector(conn)
@@ -98,7 +127,7 @@ def index_interaction(full_text, project_id):
                 try:
                     res = client.models.embed_content(
                         model="models/gemini-embedding-001",
-                        contents=full_text,
+                        contents=text_for_index,
                         config=types.EmbedContentConfig(
                             output_dimensionality=768
                         )
@@ -107,10 +136,12 @@ def index_interaction(full_text, project_id):
                     cur.execute(
                         "INSERT INTO chat_history (content, content_hash, embedding, project_id) "
                         "VALUES (%s, %s, %s, %s)",
-                        (full_text, content_hash, res.embeddings[0].values, project_id)
+                        # On stocke le texte court en DB pour ne pas polluer le futur contexte
+                        (text_for_index, content_hash, res.embeddings[0].values, project_id)
                     )
-                    console.print(f"[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée "
-                                  f"({project_id}).[/bold cyan]")
+                    msg = (f"[bold green]✔[/bold green] [bold cyan]Mémoire vectorielle synchronisée "
+                           f"({escape(str(project_id))}) - {len(text_for_index)} chars.[/bold cyan]")
+                    console.print(msg)
                 except MemoryError as e:
                     console.print(f"[bold red]⚠️ Mémoire insuffisante pour l'embedding : {e}[/bold red]")
                     return
@@ -119,7 +150,8 @@ def index_interaction(full_text, project_id):
                     return
 
     except Exception as e:
-        console.print(f"[bold red]⚠️ Note: Échec de l'indexation vectorielle ({str(e)[:100]})[/bold red]")
+        # Utilisation de escape ici aussi pour éviter que l'erreur ne casse Rich
+        console.print(f"[bold red]⚠️ Note: Échec de l'indexation :[/bold red] {escape(str(e)[:100])}")
 
 
 def update_global_summary(user_query, ai_response, project_id):
@@ -319,10 +351,7 @@ def run():
         # On force le mode PLAN pour le traitement du signal de sortie
         is_plan_mode = True
 
-        # Affiche le prompt pour debug
-        # TODO : message de debug à supprimer
-        console.log(f"[dim]Prompt final envoyé au relais : {current_user_question[:100]}...[/dim]")
-
+        # TODO : DEBUG : affichage du prompt complet
         if args.discovery:
             # AFFICHE LE PROMPT COMPLET QUI VA PARTIR À L'IA
             console.print(Rule("[bold red]VÉRIFICATION PROMPT FINAL (RELAIS)[/bold red]"))
@@ -427,7 +456,7 @@ def run():
                       f"[bold cyan]Workflow terminé avec succès [{project_id}].[/bold cyan]")
 
     except Exception as e:
-        console.print(f"[bold red]❌ Erreur système :[/bold red] {e}")
+        console.print(f"[bold red]❌ Erreur système :[/bold red] {escape(str(e))}")
 
 
 if __name__ == "__main__":

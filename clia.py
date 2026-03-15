@@ -24,7 +24,6 @@ from rich.console import Console
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
-from rich.rule import Rule
 from rich.markup import escape
 
 # Force l'encodage UTF-8 pour éviter les blocages de flux sous Windows Terminal
@@ -368,6 +367,9 @@ def execute_agentic_loop(plan, original_query, discovery_depth=0):
                 role_discovery = get_system_prompt("DISCOVERY")
                 full_prompt = f"{role_discovery}\n\n[REPO_MAP]\n{repo_data}\n\nQUESTION : {original_query}"
 
+                with open("last_full_prompt.txt", "w", encoding="utf-8") as f:
+                    f.write(full_prompt)
+
                 # On appelle le relais pour le nouveau plan
                 proc = subprocess.run(
                     [sys.executable, GLOG_PATH, original_query, "--mode", "PLAN", "--discovery"],
@@ -402,7 +404,12 @@ def execute_agentic_loop(plan, original_query, discovery_depth=0):
             continue
 
         # --- 3. EXÉCUTION DES OUTILS STANDARDS ---
-        execute_standard_tool(step)
+        success = execute_standard_tool(step)
+
+        if success:
+            step["completed"] = True  # On marque l'étape localement
+            save_plan(plan)  # On écrase le JSON sur le disque immédiatement
+
     return None
 
 
@@ -441,6 +448,32 @@ def execute_standard_tool(step):
     elif tool == "aider":
         # Filtrer les fichiers qui existent vraiment pour éviter qu'Aider ne râle
         valid_files = [f for f in files if os.path.exists(f)]
+
+        # --- ARCHIVAGE ET CONTRÔLE DU PROMPT AIDER ---
+        # On simule le contenu du prompt pour le log
+        aider_prompt_debug = (
+            f"[COMMANDE AIDER]\n"
+            f"Instruction : {instruction}\n"
+            f"Fichiers cibles : {', '.join(valid_files)}\n"
+            f"Config utilisée : {AIDER_CONFIG_PATH}\n"
+            f"------------------------------------------\n"
+        )
+
+        # Enregistrement dans last_aider_prompt.txt
+        try:
+            # On utilise un chemin absolu basé sur le script
+            log_path = os.path.join(os.getcwd(), "last_aider_prompt.txt")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(aider_prompt_debug)
+                f.flush()  # Force l'écriture
+                os.fsync(f.fileno())  # Force le système de fichier
+        except Exception as e:
+            console.print(f"[dim red]Log Error: {e}[/dim red]")
+
+        # Contrôle de taille préventif (Optionnel, mais recommandé)
+        if len(instruction) > 2000:
+            console.print("[bold yellow]⚠️ Attention : L'instruction envoyée à Aider est très longue.[/bold yellow]")
+        # ----------------------------------------------
 
         # 1. Préparation de l'environnement
         env = os.environ.copy()
@@ -705,7 +738,7 @@ def run():
         # --- Gestion des commandes de mode ---
         if main_prompt.startswith('@'):
             cmd = main_prompt[1:].lower()
-            if cmd in ['plan', 'chat', 'apply', 'discovery']:
+            if cmd in ['plan', 'chat', 'discovery']:
                 state = cmd.upper()
                 console.clear()
                 continue  # On relance la boucle pour afficher le nouveau panel
@@ -758,8 +791,13 @@ def run():
 
                     # Une fois le plan totalement réalisé, on supprime le fichier
                     if is_plan_fully_completed(current_plan):
+                        if os.path.exists(PLAN_FILE):
+                            os.remove(PLAN_FILE)  # Suppression du fichier
+                        current_plan = None  # Nettoyage mémoire
                         state = "CHAT"
                         console.print("\n[bold green]✨ Mission accomplie. Retour au MODE CHAT.[/bold green]")
+                # On remonte au début de la boucle sans appeler l'IA
+                continue
             else:
                 console.print("[bold red]⚠️ Erreur : Aucun plan n'est chargé. Générez-en un avec /plan[/bold red]")
             continue
@@ -853,14 +891,15 @@ def run():
                     cur.execute("SELECT content "
                                 "FROM chat_history "
                                 "WHERE project_id = %s "
+                                "AND (embedding <=> %s::vector) < 0.3 "
                                 "ORDER BY embedding <=> %s::vector "
-                                "LIMIT 3",
-                                (project_id, embedding,))
+                                "LIMIT 2",
+                                (project_id, embedding, embedding,))
 
                     rows = cur.fetchall()
                     # TODO : log à supprimer
-                    console.log(f"[dim]Debug: {len(rows)} souvenirs trouvés.[/dim]")
-                    context_vectoriel = "\n".join([f"- {r[0]}" for r in rows])
+                    console.print(f"[dim]Debug: {len(rows)} souvenirs trouvés.[/dim]")
+                    context_vectoriel = "\n".join([f"- {escape(r[0])}" for r in rows])
 
                     cur.close()
                     conn.close()
@@ -878,30 +917,44 @@ def run():
         # --- Ajustement du Prompt selon le Mode ---
         files_context_string = "\n\n".join(context_blocks)
         if state == "PLAN":
-            role_instruction = get_system_prompt("PLAN")
+            role_instruction = get_system_prompt(state)
         elif state == "DISCOVERY":  # Le mode appelé après get_repo_map
-            role_instruction = get_system_prompt("DISCOVERY", original_query)
+            role_instruction = get_system_prompt(state, original_query)
         else:
-            role_instruction = "\nRéponds en tant qu'expert technique. Analyse et suggère des solutions."
+            # Mode CHAT optimisé pour la discussion
+            role_instruction = (
+                "Réponds en tant qu'expert technique.\n"
+                "1. Privilégie TOUJOURS une réponse textuelle directe et concise.\n"
+                "2. NE GÉNÈRE PAS de structure JSON (steps/plan) dans ce mode.\n"
+                "3. Si la question nécessite une exploration complexe, suggère de basculer en mode @plan."
+            )
 
-        full_prompt = f"""
-[INSTRUCTION_ROLE]
-{role_instruction}
-[/INSTRUCTION_ROLE]
+        # 1. Préparation des blocs individuels (uniquement s'ils ont du contenu)
+        sections = []
 
-[STRUCTURE_DU_PROJET]
-Utilise l'outil 'get_repo_map' si tu as besoin de voir l'arborescence des fichiers.
-[/STRUCTURE_DU_PROJET]
+        # Bloc Rôle (Toujours présent)
+        sections.append(f"[INSTRUCTION_ROLE]\n{role_instruction.strip()}\n[/INSTRUCTION_ROLE]")
 
-[CONTEXTE_FICHIERS]
-{files_context_string}
-[/CONTEXTE_FICHIERS]
+        # Bloc Structure (Toujours présent pour donner de la visibilité à l'IA)
+        sections.append(
+            "[STRUCTURE_DU_PROJET]\n"
+            "Demande à utiliser l'outil 'get_repo_map' si tu as besoin de voir l'arborescence des fichiers.\n"
+            "[/STRUCTURE_DU_PROJET]"
+        )
 
-[CONTEXTE_VECTORIEL]
-{context_vectoriel}
-[/CONTEXTE_VECTORIEL]
+        # Bloc Fichiers (Conditionnel)
+        if files_context_string.strip():
+            sections.append(f"[CONTEXTE_FICHIERS]\n{files_context_string.strip()}\n[/CONTEXTE_FICHIERS]")
 
-QUESTION_UTILISATEUR : {main_prompt}"""
+        # Bloc Vectoriel (Conditionnel)
+        # On vérifie si context_vectoriel contient autre chose que des messages d'erreur ou du vide
+        if context_vectoriel and "Indisponible" not in context_vectoriel and context_vectoriel.strip():
+            sections.append(f"[CONTEXTE_VECTORIEL]\n{context_vectoriel.strip()}\n[/CONTEXTE_VECTORIEL]")
+
+        # 2. Assemblage final
+        # On ajoute la question à la fin
+        prompt_body = "\n\n".join(sections)
+        full_prompt = f"{prompt_body}\n\nQUESTION_UTILISATEUR : {main_prompt}"
 
         # --- Appel de l'IA (glog_relay) ---
         try:
@@ -921,11 +974,10 @@ QUESTION_UTILISATEUR : {main_prompt}"""
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
 
-            # --- DEBUG STRATÉGIQUE ---
-            console.print(Rule("[bold purple]DEBUG : CONTENU ENVOYÉ À L'IA[/bold purple]"))
-            # On affiche les 500 premiers caractères pour voir si les instructions JSON sont là
-            console.print(f"[dim]{escape(full_prompt[:500])}...[/dim]")
-            console.print(Rule(style="bold purple"))
+            # --- ARCHIVAGE DU PROMPT (DEBUG) ---
+            with open("last_full_prompt.txt", "w", encoding="utf-8") as f:
+                f.write(full_prompt)
+            console.print("[dim cyan]💾 Prompt complet archivé dans 'last_full_prompt.txt'[/dim cyan]")
 
             proc = subprocess.run(
                 cmd,
@@ -939,7 +991,7 @@ QUESTION_UTILISATEUR : {main_prompt}"""
             # Décodage manuel sécurisé du stderr (les logs de debug)
             if proc.stderr:
                 stderr_output = proc.stderr.decode('utf-8', errors='replace')
-                console.print(f"[dim]{stderr_output}[/dim]")
+                console.print(f"[dim]{escape(stderr_output)}[/dim]")
 
             # Décodage avec une sécurité supplémentaire
             stdout_output = ""
@@ -975,10 +1027,10 @@ QUESTION_UTILISATEUR : {main_prompt}"""
                     console.print("[bold red]❌ Erreur de structure JSON reçue du relais.[/bold red]")
             else:
                 # Mode CHAT classique
-                console.print(stdout_output)
+                console.print(escape(stdout_output))
 
         except Exception as e:
-            console.print(f"[bold red]Erreur : {e}[/bold red]")
+            console.print(f"[bold red]Erreur : {escape(str(e))}[/bold red]")
 
 
 if __name__ == "__main__":

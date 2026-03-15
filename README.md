@@ -1,5 +1,7 @@
 # 🚀 Workflow Gemini + Aider
 
+>NOTE: Utiiser l'outil avec git bash dans le Terminal de Windows pour bénéficier de l'encodage moderne et de l'interface Rich.
+
 ## 📋 Prérequis
 
 🐍 Python installé sur le poste. J'utilise ici la version 3.10.
@@ -600,4 +602,7 @@ avec retour à la ligne (ENTER), la validation de la saisie se faisant avec la c
 La librairie **rich** permet de gérer l'affichage em markdonw, d'ajouter des spinners, barre de progression, panneaux,
 coloration et plus encore.
 
+## Vérifier la consommation des crédits
+
+Visiter OpenRouter : https://openrouter.ai/settings/credits
 
